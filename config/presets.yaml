@@ -5,11 +5,15 @@ Conservative:
   wait_threshold: 65
   forecast_threshold: 70
   atr_multiplier: 1.5
+  atr_stop_multiplier: 3.2
+  atr_tp_multiplier: 5.0
   min_reward_risk: 1.8
   adx_minimum: 25
   middle_range_lower_pct: 30
   middle_range_upper_pct: 70
   entry_chase_atr_fraction: 0.25
+  short_plans_enabled: false
+  kc_breakout_score: 25
 Balanced Strict:
   preset_name: Balanced Strict
   buy_threshold: 78
@@ -17,11 +21,15 @@ Balanced Strict:
   wait_threshold: 60
   forecast_threshold: 65
   atr_multiplier: 1.3
+  atr_stop_multiplier: 3.0
+  atr_tp_multiplier: 6.0
   min_reward_risk: 1.5
   adx_minimum: 20
   middle_range_lower_pct: 35
   middle_range_upper_pct: 65
   entry_chase_atr_fraction: 0.35
+  short_plans_enabled: false
+  kc_breakout_score: 25
 Aggressive:
   preset_name: Aggressive
   buy_threshold: 72
@@ -29,8 +37,12 @@ Aggressive:
   wait_threshold: 55
   forecast_threshold: 60
   atr_multiplier: 1.1
+  atr_stop_multiplier: 2.5
+  atr_tp_multiplier: 4.0
   min_reward_risk: 1.3
   adx_minimum: 15
   middle_range_lower_pct: 40
   middle_range_upper_pct: 60
   entry_chase_atr_fraction: 0.50
+  short_plans_enabled: false
+  kc_breakout_score: 30
