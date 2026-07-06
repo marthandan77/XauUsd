@@ -3,6 +3,9 @@ data_provider: twelvedata
 twelve_data_symbol: XAU/USD
 timezone: Asia/Singapore
 twelve_data_outputsize: 5000
+auto_refresh_enabled: true
+refresh_normal_seconds: 120
+refresh_high_seconds: 30
 minimum_bars: 500
 price_interval: 15m
 price_period: 30d
