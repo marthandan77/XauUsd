@@ -22,6 +22,7 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
             "tp1": tp1,
             "tp2": tp2,
             "risk": risk,
+            "note": "Active bullish advisory plan.",
         }
 
     if action == "SELL PLAN" and bool(settings.get("short_plans_enabled", False)):
@@ -37,16 +38,30 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
             "tp1": tp1,
             "tp2": tp2,
             "risk": risk,
+            "note": "Active bearish advisory plan. Shorts must be explicitly enabled.",
+        }
+
+    if action == "EXIT LONG / AVOID BUY":
+        return {
+            "side": "exit_or_avoid",
+            "entry_zone_low": None,
+            "entry_zone_high": None,
+            "stop": None,
+            "tp1": None,
+            "tp2": None,
+            "risk": 0.0,
+            "note": "Bearish conditions detected. This is not a short entry unless short plans are enabled.",
         }
 
     return {
         "side": "none",
-        "entry_zone_low": price,
-        "entry_zone_high": price,
-        "stop": price,
-        "tp1": price,
-        "tp2": price,
+        "entry_zone_low": None,
+        "entry_zone_high": None,
+        "stop": None,
+        "tp1": None,
+        "tp2": None,
         "risk": 0.0,
+        "note": "No active trade plan. Wait for a clean actionable signal.",
     }
 
 
@@ -54,9 +69,9 @@ def room_ratio(action: str, plan: dict, market) -> float:
     risk = float(plan.get("risk", 0) or 0)
     if risk <= 0:
         return 0.0
-    if action == "BUY PLAN":
+    if action == "BUY PLAN" and plan.get("entry_zone_high") is not None:
         room = float(market.resistance) - float(plan["entry_zone_high"])
-    elif action == "SELL PLAN":
+    elif action == "SELL PLAN" and plan.get("entry_zone_low") is not None:
         room = float(plan["entry_zone_low"]) - float(market.support)
     else:
         return 0.0
@@ -65,6 +80,8 @@ def room_ratio(action: str, plan: dict, market) -> float:
 
 def advisory_position_size(account_equity: float, risk_pct: float, entry: float, stop: float) -> float:
     """Return advisory units only. This function never places orders."""
+    if entry is None or stop is None:
+        return 0.0
     risk_per_unit = abs(float(entry) - float(stop))
     if risk_per_unit <= 0:
         return 0.0
