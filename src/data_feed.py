@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -50,6 +51,24 @@ def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["open", "high", "low", "close"]).sort_index()
 
 
+def _local_env_key() -> str:
+    """Read TWELVE_DATA_API_KEY from a local .env file without adding dependencies."""
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return ""
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "TWELVE_DATA_API_KEY":
+                return value.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
 def _get_twelve_data_api_key(settings: dict | None = None) -> str:
     if settings:
         runtime_key = settings.get("twelve_data_api_key_runtime")
@@ -59,6 +78,10 @@ def _get_twelve_data_api_key(settings: dict | None = None) -> str:
     env_key = os.getenv("TWELVE_DATA_API_KEY")
     if env_key:
         return env_key.strip()
+
+    file_key = _local_env_key()
+    if file_key:
+        return file_key
 
     try:
         import streamlit as st
@@ -113,7 +136,7 @@ def _outputsize(settings: dict) -> int:
 def load_twelve_data_bars(settings: dict) -> FeedResult:
     api_key = _get_twelve_data_api_key(settings)
     if not api_key:
-        return FeedResult(pd.DataFrame(), "twelvedata:none", "TWELVE_DATA_API_KEY is not set in Streamlit runtime")
+        return FeedResult(pd.DataFrame(), "twelvedata:none", "TWELVE_DATA_API_KEY is not set in sidebar, environment, .env, or Streamlit secrets")
 
     try:
         from twelvedata import TDClient
