@@ -13,8 +13,8 @@ class FeedResult:
     warning: str = ""
 
 
-def make_sample_bars(rows: int = 320) -> pd.DataFrame:
-    index = pd.date_range(end=pd.Timestamp.utcnow(), periods=rows, freq="15min")
+def make_sample_bars(rows: int = 640, freq: str = "15min") -> pd.DataFrame:
+    index = pd.date_range(end=pd.Timestamp.utcnow(), periods=rows, freq=freq)
     rng = np.random.default_rng(7)
     base = 2350 + np.cumsum(rng.normal(0, 1.45, rows))
     open_ = base + rng.normal(0, 0.55, rows)
@@ -47,10 +47,21 @@ def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["open", "high", "low", "close"])
 
 
+def _resample_ohlc(bars: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if bars.empty:
+        return bars
+    return (
+        bars.resample(rule)
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        .dropna(subset=["open", "high", "low", "close"])
+    )
+
+
 def load_live_bars(settings: dict) -> FeedResult:
     symbols = [settings.get("symbol_primary", "XAUUSD=X"), settings.get("symbol_fallback", "GC=F")]
-    period = settings.get("price_period", "7d")
-    interval = settings.get("price_interval", "15m")
+    period = settings.get("price_period", "30d")
+    requested_interval = str(settings.get("price_interval", "15m"))
+    yfinance_interval = {"4h": "1h"}.get(requested_interval, requested_interval)
     try:
         import yfinance as yf
     except Exception as exc:
@@ -58,10 +69,12 @@ def load_live_bars(settings: dict) -> FeedResult:
     warnings = []
     for symbol in symbols:
         try:
-            raw = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=False)
+            raw = yf.download(symbol, period=period, interval=yfinance_interval, progress=False, auto_adjust=False)
             bars = normalize_ohlc(raw)
+            if requested_interval == "4h" and not bars.empty:
+                bars = _resample_ohlc(bars, "4h")
             if not bars.empty:
-                return FeedResult(bars, symbol, "")
+                return FeedResult(bars, symbol, "" if requested_interval != "4h" else "4h bars resampled from 1h feed")
         except Exception as exc:
             warnings.append(f"{symbol}: {exc}")
     return FeedResult(pd.DataFrame(), "none", "; ".join(warnings) or "no live bars returned")
