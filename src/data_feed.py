@@ -50,10 +50,16 @@ def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["open", "high", "low", "close"]).sort_index()
 
 
-def _get_twelve_data_api_key() -> str:
+def _get_twelve_data_api_key(settings: dict | None = None) -> str:
+    if settings:
+        runtime_key = settings.get("twelve_data_api_key_runtime")
+        if runtime_key:
+            return str(runtime_key).strip()
+
     env_key = os.getenv("TWELVE_DATA_API_KEY")
     if env_key:
         return env_key.strip()
+
     try:
         import streamlit as st
 
@@ -105,9 +111,9 @@ def _outputsize(settings: dict) -> int:
 
 
 def load_twelve_data_bars(settings: dict) -> FeedResult:
-    api_key = _get_twelve_data_api_key()
+    api_key = _get_twelve_data_api_key(settings)
     if not api_key:
-        return FeedResult(pd.DataFrame(), "twelvedata:none", "TWELVE_DATA_API_KEY is not set")
+        return FeedResult(pd.DataFrame(), "twelvedata:none", "TWELVE_DATA_API_KEY is not set in Streamlit runtime")
 
     try:
         from twelvedata import TDClient
