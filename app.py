@@ -117,24 +117,17 @@ def settings_panel(settings: dict, presets: dict) -> dict:
 
 def load_bars(settings: dict) -> FeedResult:
     st.sidebar.header("Data")
-    data_mode = st.sidebar.radio("Data mode", ["Massive API", "yfinance fallback", "CSV upload", "Sample"], index=0)
+    data_mode = st.sidebar.radio("Data mode", ["Twelve Data API", "CSV upload", "Sample"], index=0)
     if data_mode == "CSV upload":
         uploaded = st.sidebar.file_uploader("Upload OHLC CSV", type=["csv"])
         if uploaded is not None:
             return load_csv(uploaded)
         return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "CSV not uploaded; sample data used")
-    if data_mode == "Massive API":
-        settings["data_provider"] = "massive"
+    if data_mode == "Twelve Data API":
         feed = load_live_bars(settings)
         if not feed.bars.empty:
             return feed
-        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "Massive feed unavailable; sample data used. " + feed.warning)
-    if data_mode == "yfinance fallback":
-        settings["data_provider"] = "yfinance"
-        feed = load_live_bars(settings)
-        if not feed.bars.empty:
-            return feed
-        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "yfinance feed unavailable; sample data used. " + feed.warning)
+        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "Twelve Data unavailable; sample data used. " + feed.warning)
     return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "sample data")
 
 
