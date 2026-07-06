@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 import yaml
 
 from src.ai_explainer import explain
@@ -24,7 +22,6 @@ from src.veto_engine import apply_veto
 
 ROOT = Path(__file__).resolve().parent
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
-SGT = timezone(timedelta(hours=8))
 
 st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
 
@@ -45,50 +42,11 @@ def _sample_freq(settings: dict) -> str:
     )
 
 
-def _scheduled_refresh_seconds(settings: dict) -> tuple[int | None, str]:
-    now = datetime.now(SGT)
-    minutes = now.hour * 60 + now.minute
-    normal_start = 15 * 60
-    high_start = 20 * 60
-    end = 24 * 60
-
-    if normal_start <= minutes < high_start:
-        return int(settings.get("refresh_normal_seconds", 120)), "3:00pm-8:00pm SGT window"
-    if high_start <= minutes < end:
-        return int(settings.get("refresh_high_seconds", 30)), "8:00pm-12:00am SGT high window"
-    return None, "outside scheduled auto-refresh window"
-
-
-def refresh_panel(settings: dict) -> None:
+def refresh_panel() -> None:
     st.sidebar.header("Refresh")
     if st.sidebar.button("Manual refresh now", type="primary"):
         st.rerun()
-
-    enabled = st.sidebar.toggle("Enable scheduled auto-refresh", bool(settings.get("auto_refresh_enabled", True)))
-    now = datetime.now(SGT)
-    seconds, window_label = _scheduled_refresh_seconds(settings)
-    st.sidebar.caption(f"SGT now: {now:%H:%M:%S}. {window_label}.")
-
-    if not enabled:
-        st.sidebar.caption("Scheduled auto-refresh is off. Manual refresh still works.")
-        return
-
-    if seconds is None:
-        st.sidebar.caption("Auto-refresh inactive until 3:00pm SGT. Manual refresh still works.")
-        return
-
-    st.sidebar.caption(f"Next auto-refresh in {seconds} seconds.")
-    components.html(
-        f"""
-        <script>
-        setTimeout(function() {{
-            window.parent.location.reload();
-        }}, {seconds * 1000});
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
+    st.sidebar.caption("Auto-refresh is disabled. The app refreshes only when you press the button or manually reload the browser.")
 
 
 def fmt_price(value) -> str:
@@ -231,7 +189,7 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
 settings = load_yaml(ROOT / "config/default_settings.yaml")
 presets = load_yaml(ROOT / "config/presets.yaml")
 settings = settings_panel(settings, presets)
-refresh_panel(settings)
+refresh_panel()
 macro_bias = st.sidebar.selectbox("Macro bias", ["mixed", "supportive", "restrictive"], index=0)
 feed = load_bars(settings)
 
