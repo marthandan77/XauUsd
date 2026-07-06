@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +21,7 @@ from src.trade_plan import advisory_position_size, build_trade_plan
 from src.veto_engine import apply_veto
 
 ROOT = Path(__file__).resolve().parent
+ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
 
 st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
 
@@ -32,6 +34,42 @@ def load_yaml(path: Path) -> dict:
 
 def _select_index(options: list[str], value: str) -> int:
     return options.index(value) if value in options else 0
+
+
+def _sample_freq(settings: dict) -> str:
+    return {"15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
+        str(settings.get("price_interval", "15m")), "15min"
+    )
+
+
+def fmt_price(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except Exception:
+        return "N/A"
+    if not math.isfinite(value):
+        return "N/A"
+    return f"{value:,.2f}"
+
+
+def fmt_units(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except Exception:
+        return "N/A"
+    if not math.isfinite(value) or value <= 0:
+        return "N/A"
+    return f"{value:,.2f}"
+
+
+def active_value(plan: dict, key: str, final_action: str):
+    if final_action not in ACTIONABLE:
+        return None
+    return plan.get(key)
 
 
 def settings_panel(settings: dict, presets: dict) -> dict:
@@ -84,13 +122,13 @@ def load_bars(settings: dict) -> FeedResult:
         uploaded = st.sidebar.file_uploader("Upload OHLC CSV", type=["csv"])
         if uploaded is not None:
             return load_csv(uploaded)
-        return FeedResult(make_sample_bars(), "sample", "CSV not uploaded; sample data used")
+        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "CSV not uploaded; sample data used")
     if data_mode == "Live yfinance":
         feed = load_live_bars(settings)
         if not feed.bars.empty:
             return feed
-        return FeedResult(make_sample_bars(), "sample", "live feed unavailable; sample data used. " + feed.warning)
-    return FeedResult(make_sample_bars(), "sample", "sample data")
+        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "live feed unavailable; sample data used. " + feed.warning)
+    return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "sample data")
 
 
 def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go.Figure:
@@ -117,7 +155,7 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
         for column, label in [("kc_upper", "KC Upper"), ("kc_lower", "KC Lower")]:
             if column in chart_df:
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df[column], mode="lines", name=label))
-    if action in {"BUY PLAN", "SELL PLAN"}:
+    if action in ACTIONABLE and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None:
         marker_price = (float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0
         fig.add_trace(
             go.Scatter(
@@ -162,9 +200,10 @@ plan = build_trade_plan(action, market, settings)
 bands = price_bands(market, regime)
 veto = apply_veto(action, plan, market, regime, macro, settings)
 summary = explain(regime, scores, veto, market, macro)
+active_plan = veto["final_action"] in ACTIONABLE
 
 advisory_qty = 0.0
-if veto["final_action"] in {"BUY PLAN", "SELL PLAN"}:
+if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
     advisory_qty = advisory_position_size(
         account_equity=10000,
         risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0,
@@ -175,6 +214,14 @@ if veto["final_action"] in {"BUY PLAN", "SELL PLAN"}:
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
 page = st.sidebar.radio("Page", ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
+
+source_cols = st.columns(4)
+source_cols[0].metric("Data source", feed.source)
+source_cols[1].metric("Latest price", fmt_price(market.price))
+source_cols[2].metric("Rows loaded", f"{len(feed.bars):,}")
+source_cols[3].metric("Rows after warm-up", f"{len(bars):,}")
+if feed.warning:
+    st.warning(feed.warning)
 
 if page == "Forecast Manager":
     c1, c2, c3, c4 = st.columns(4)
@@ -188,16 +235,17 @@ if page == "Forecast Manager":
     s3.metric("Range position", f"{market.range_position_pct:.1f}%")
     s4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
     st.info(summary)
+    st.caption(plan.get("note", ""))
     if veto["reasons"]:
         st.error("Veto reasons: " + "; ".join(veto["reasons"]))
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Entry zone low", f"{plan['entry_zone_low']:,.2f}")
-    p2.metric("Entry zone high", f"{plan['entry_zone_high']:,.2f}")
-    p3.metric("Guard level", f"{plan['stop']:,.2f}")
-    p4.metric("Target 1", f"{plan['tp1']:,.2f}")
+    p1.metric("Entry zone low", fmt_price(active_value(plan, "entry_zone_low", veto["final_action"])))
+    p2.metric("Entry zone high", fmt_price(active_value(plan, "entry_zone_high", veto["final_action"])))
+    p3.metric("Guard level", fmt_price(active_value(plan, "stop", veto["final_action"])))
+    p4.metric("Target 1", fmt_price(active_value(plan, "tp1", veto["final_action"])))
     p5, p6 = st.columns(2)
-    p5.metric("Target 2", f"{plan['tp2']:,.2f}")
-    p6.metric("Advisory units @ $10k equity", f"{advisory_qty:,.2f}")
+    p5.metric("Target 2", fmt_price(active_value(plan, "tp2", veto["final_action"])))
+    p6.metric("Advisory units @ $10k equity", fmt_units(advisory_qty))
     st.subheader("Price and indicators")
     st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
@@ -237,16 +285,14 @@ elif page == "Log Snapshot":
         "final_action": veto["final_action"],
         "quality": veto["trade_quality"],
         "veto_reasons": "; ".join(veto["reasons"]),
-        "entry_zone_low": plan["entry_zone_low"],
-        "entry_zone_high": plan["entry_zone_high"],
-        "guard_level": plan["stop"],
-        "target_1": plan["tp1"],
-        "target_2": plan["tp2"],
-        "advisory_units_10k": advisory_qty,
+        "entry_zone_low": active_value(plan, "entry_zone_low", veto["final_action"]),
+        "entry_zone_high": active_value(plan, "entry_zone_high", veto["final_action"]),
+        "guard_level": active_value(plan, "stop", veto["final_action"]),
+        "target_1": active_value(plan, "tp1", veto["final_action"]),
+        "target_2": active_value(plan, "tp2", veto["final_action"]),
+        "advisory_units_10k": advisory_qty if active_plan else None,
+        "plan_note": plan.get("note", ""),
     }
     snap = pd.DataFrame([row])
     st.dataframe(snap, use_container_width=True)
     st.download_button("Download snapshot CSV", snap.to_csv(index=False), file_name="xauusd_forecast_snapshot.csv")
-
-if feed.warning:
-    st.warning(feed.warning)
