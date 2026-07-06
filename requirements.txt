@@ -3,6 +3,5 @@ pandas>=2.2
 numpy>=1.26
 plotly>=5.22
 PyYAML>=6.0
-yfinance>=0.2.40
-requests>=2.32
+twelvedata[pandas]>=1.4.0
 pytest>=8.0
