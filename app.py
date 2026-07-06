@@ -124,6 +124,14 @@ def load_bars(settings: dict) -> FeedResult:
             return load_csv(uploaded)
         return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "CSV not uploaded; sample data used")
     if data_mode == "Twelve Data API":
+        key_input = st.sidebar.text_input(
+            "Twelve Data API key - optional local session override",
+            value="",
+            type="password",
+            help="Use this only if Streamlit cannot see your Windows environment variable. The key is not saved to GitHub.",
+        )
+        if key_input.strip():
+            settings["twelve_data_api_key_runtime"] = key_input.strip()
         feed = load_live_bars(settings)
         if not feed.bars.empty:
             return feed
