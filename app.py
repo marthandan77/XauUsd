@@ -9,6 +9,7 @@ import streamlit as st
 import yaml
 
 from src.ai_explainer import explain
+from src.bias_validation import bias_validation_summary, bias_validation_table
 from src.data_feed import FeedResult, load_csv, load_live_bars, make_sample_bars
 from src.forecast_engine import choose_action, score_forecast
 from src.horizon_forecaster import horizon_forecast_table, multi_horizon_forecast
@@ -513,6 +514,7 @@ status = plan_status(action, veto["final_action"], plan, candidate_action, candi
 display_plan = plan if has_plan_levels(plan) else candidate_plan
 horizon_forecasts = multi_horizon_forecast(bars, market, action, veto, candidate_action, settings)
 scalp_decision = scalp_gate(bars, market, scores, macro, kc, settings)
+bias_validation = bias_validation_summary(bars, market, scores, settings)
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
@@ -525,7 +527,7 @@ if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zo
 
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio("Page", ["Forecast Manager", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
+page = st.sidebar.radio("Page", ["Forecast Manager", "Bull/Bear Validation", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
 
 source_cols = st.columns(4)
 source_cols[0].metric("Data source", feed.source)
@@ -548,6 +550,7 @@ if page == "Forecast Manager":
     s3.metric("Range position", f"{market.range_position_pct:.1f}%")
     s4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
     st.info(summary)
+    st.caption(f"Bull/Bear validation: {bias_validation.get('overall_verdict', 'NO EDGE')} | Side: {bias_validation.get('side', 'NONE')}")
     st.caption(plan.get("note", ""))
     if candidate_note and (not has_plan_levels(plan) or veto["final_action"] not in ACTIONABLE):
         st.warning(candidate_note)
@@ -569,6 +572,21 @@ if page == "Forecast Manager":
         if st.button("Scan scalp now", type="primary"):
             scalp_display_for_scan = _display_scalp_table(scalp_decision)
             _show_scalp_scan_result(scalp_decision, scalp_display_for_scan)
+
+elif page == "Bull/Bear Validation":
+    st.subheader("Bull/Bear Validation")
+    st.caption("Checks whether the current bull/bear setup had real forward follow-through in similar historical setups. This is evidence, not an order signal.")
+    b1, b2, b3 = st.columns(3)
+    b1.metric("Current bias", bias_validation.get("bias", "mixed"))
+    b2.metric("Validation side", bias_validation.get("side", "NONE"))
+    b3.metric("Overall verdict", bias_validation.get("overall_verdict", "NO EDGE"))
+    if bias_validation.get("warning"):
+        st.warning(bias_validation["warning"])
+    validation_display = bias_validation_table(bias_validation)
+    main_cols = ["horizon", "side", "status", "verdict", "sample_count", "follow_through_pct", "avg_favorable_move", "avg_adverse_move", "edge_score", "reason"]
+    st.dataframe(validation_display[[c for c in main_cols if c in validation_display.columns]], use_container_width=True, hide_index=True)
+    with st.expander("Current matched setup"):
+        st.json(bias_validation.get("setup", {}))
 
 elif page == "Scalp Gate":
     st.subheader("Scalp Gate")
@@ -641,6 +659,8 @@ elif page == "Log Snapshot":
         "plan_status": status,
         "quality": veto["trade_quality"],
         "veto_reasons": "; ".join(veto["reasons"]),
+        "bias_validation_side": bias_validation.get("side"),
+        "bias_validation_verdict": bias_validation.get("overall_verdict"),
         "entry_zone_low": plan_value(display_plan, "entry_zone_low"),
         "entry_zone_high": plan_value(display_plan, "entry_zone_high"),
         "stop_loss": plan_value(display_plan, "stop"),
