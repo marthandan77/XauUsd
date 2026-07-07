@@ -268,7 +268,7 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["horizon_adverse_quantile"] = st.sidebar.slider("Stop Loss adverse quantile", 0.50, 0.95, float(settings.get("horizon_adverse_quantile", 0.80)), 0.05)
 
     st.sidebar.header("Scalp Gate")
-    settings["scalp_min_samples"] = st.sidebar.slider("Scalp minimum samples", 30, 200, int(settings.get("scalp_min_samples", 60)), 5)
+    settings["scalp_min_samples"] = st.sidebar.slider("Scalp minimum samples", 30, 200, int(settings.get("scalp_min_samples", 40)), 5)
     settings["scalp_cost_buffer"] = st.sidebar.slider("Scalp cost/slippage buffer", 0.00, 3.00, float(settings.get("scalp_cost_buffer", 0.40)), 0.05)
     settings["scalp_rsi_sell_floor"] = st.sidebar.slider("RSI sell floor", 20.0, 50.0, float(settings.get("scalp_rsi_sell_floor", 35.0)), 1.0)
     settings["scalp_rsi_buy_ceiling"] = st.sidebar.slider("RSI buy ceiling", 50.0, 80.0, float(settings.get("scalp_rsi_buy_ceiling", 65.0)), 1.0)
@@ -405,7 +405,7 @@ def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFr
         ("RSI", fmt_metric(scalp_decision.rsi, 1), "Overbought/oversold guard."),
         ("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2), "Negative=down, positive=up."),
         ("5m scalp edge", fmt_metric(_horizon_value(scalp_display, "5m", "scalp_edge"), 2), "Trigger. >0 good."),
-        ("15m scalp edge", fmt_metric(_horizon_value(scalp_display, "15m", "scalp_edge"), 2), "Danger check. <0 bad."),
+        ("15m scalp edge", fmt_metric(_horizon_value(scalp_display, "15m", "scalp_edge"), 2), "Danger check. <=-0.25 blocks."),
         ("TP1 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 1), "Fast target odds."),
         ("TP2 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1), "Stretch target odds."),
         ("SL hit %", fmt_metric(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 1), "Stop-loss odds."),
@@ -433,47 +433,78 @@ def _scalp_signal_confidence(scalp_decision, scalp_display: pd.DataFrame) -> int
 
     confidence = 35.0
     confidence += min(max(five_edge, 0.0) * 12.0, 20.0)
-    confidence += 15.0 if fifteen_edge >= 0 else 0.0
+    confidence += 15.0 if fifteen_edge >= 0 else 7.0
     confidence += min(max(tp1_rate - sl_rate, 0.0) * 0.35, 20.0)
     confidence += min(max(room_ratio - 1.5, 0.0) * 8.0, 10.0)
-    confidence += min(train_samples / 60.0, 1.0) * 5.0
+    confidence += min(train_samples / 40.0, 1.0) * 5.0
     confidence += min(validation_samples / 15.0, 1.0) * 5.0
     confidence += 5.0
     return int(max(0, min(round(confidence), 95)))
 
 
+def _scalp_quality_label(confidence: int) -> str:
+    if confidence >= 80:
+        return "Strong"
+    if confidence >= 70:
+        return "Good"
+    if confidence >= 60:
+        return "Acceptable"
+    return "Weak"
+
+
 def _show_scalp_scan_result(scalp_decision, scalp_display: pd.DataFrame) -> None:
     confidence = _scalp_signal_confidence(scalp_decision, scalp_display)
     five_status = _horizon_value(scalp_display, "5m", "status")
-    viable = scalp_decision.recommendation in SCALP_ACTIONS and confidence >= 70 and str(five_status) == "VALID"
+    viable = scalp_decision.recommendation in SCALP_ACTIONS and str(five_status) == "VALID"
+
+    five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
+    fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
+    tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
+    sl_rate = _safe_float(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 0.0)
+    reasons = list(getattr(scalp_decision, "reasons", []) or [])
 
     if not viable:
+        near_miss = str(five_status) == "VALID" and (five_edge > 0 or tp1_rate > sl_rate or _safe_float(scalp_decision.room_ratio, 0.0) > 0)
+        if near_miss:
+            st.warning("NEAR MISS / WAIT")
+            st.write("Main blocker: " + (reasons[0] if reasons else "Scalp Gate has not cleared all filters."))
+            cols = st.columns(6)
+            cols[0].metric("Closest side", scalp_decision.side)
+            cols[1].metric("5m Edge", fmt_metric(five_edge, 2))
+            cols[2].metric("15m Edge", fmt_metric(fifteen_edge, 2))
+            cols[3].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
+            cols[4].metric("RSI", fmt_metric(scalp_decision.rsi, 1))
+            cols[5].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
+            st.caption("No entry, SL or TP shown because at least one filter is still blocking the scalp.")
+            return
+
         st.error("NO GOOD SIGNAL")
-        reasons = list(getattr(scalp_decision, "reasons", []) or [])
-        if confidence and confidence < 70:
-            reasons.append(f"Scalp confidence {confidence}% is below 70%.")
         if not reasons:
             reasons.append("Scalp Gate did not produce a clean signal.")
         st.write("Reason: " + "; ".join(reasons))
         return
 
+    quality = _scalp_quality_label(confidence)
     st.success(f"SCALP SIGNAL: {scalp_decision.recommendation}")
     top = st.columns(5)
-    top[0].metric("Confidence", f"{confidence}%")
+    top[0].metric("Confidence", f"{confidence}%", quality)
     top[1].metric("Entry", fmt_price(_horizon_value(scalp_display, "5m", "entry")))
     top[2].metric("Stop Loss", fmt_price(_horizon_value(scalp_display, "5m", "stop_loss")))
     top[3].metric("Take Profit 1", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_1")))
     top[4].metric("Take Profit 2", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_2")))
 
-    quality = st.columns(7)
-    quality[0].metric("5m Edge", fmt_metric(_horizon_value(scalp_display, "5m", "scalp_edge"), 2))
-    quality[1].metric("15m Edge", fmt_metric(_horizon_value(scalp_display, "15m", "scalp_edge"), 2))
-    quality[2].metric("TP1 Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 1))
-    quality[3].metric("TP2 Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1))
-    quality[4].metric("SL Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 1))
-    quality[5].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
-    quality[6].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
-    st.caption("Reason: 5m trigger valid. 15m danger check clear. Room, RSI and KC guards passed.")
+    quality_cols = st.columns(7)
+    quality_cols[0].metric("5m Edge", fmt_metric(five_edge, 2))
+    quality_cols[1].metric("15m Edge", fmt_metric(fifteen_edge, 2))
+    quality_cols[2].metric("TP1 Hit %", fmt_metric(tp1_rate, 1))
+    quality_cols[3].metric("TP2 Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1))
+    quality_cols[4].metric("SL Hit %", fmt_metric(sl_rate, 1))
+    quality_cols[5].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
+    quality_cols[6].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
+    if fifteen_edge < 0:
+        st.caption("Reason: 5m trigger valid. 15m is slightly negative but above the hard block threshold. Treat as caution.")
+    else:
+        st.caption("Reason: 5m trigger valid. 15m danger check clear. Room, RSI and KC guards passed.")
 
 
 settings = load_settings()
@@ -594,7 +625,7 @@ elif page == "Scalp Gate":
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Recommendation", scalp_decision.recommendation); m1.caption("Final answer.")
     m2.metric("Side", scalp_decision.side); m2.caption("Allowed direction.")
-    m3.metric("Room ratio", fmt_metric(scalp_decision.room_ratio, 2)); m3.caption("Space vs risk.")
+    m3.metric("Room ratio", fmt_metric(scalp_decision.room_ratio, 2)); m3.caption("Scalp room / scalp risk.")
     m4.metric("RSI", fmt_metric(scalp_decision.rsi, 1)); m4.caption("Overbought/oversold guard.")
     m5.metric("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2)); m5.caption("Negative=down, positive=up.")
     if scalp_decision.reasons:
