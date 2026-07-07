@@ -23,6 +23,10 @@ atr_tp_multiplier: 6.0
 sell_tp1_atr_multiplier: 1.75
 sell_tp2_atr_multiplier: 3.25
 sell_support_buffer_atr: 0.10
+horizon_min_samples: 30
+horizon_tp1_quantile: 0.50
+horizon_tp2_quantile: 0.75
+horizon_adverse_quantile: 0.80
 min_reward_risk: 1.5
 tp1_r: 1.5
 tp2_r: 2.0
