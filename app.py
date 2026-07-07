@@ -18,6 +18,7 @@ from src.macro_engine import macro_context
 from src.market_map import build_market_map
 from src.range_model import price_bands
 from src.regime_engine import classify_regime
+from src.scalp_gate import scalp_gate, scalp_horizon_table
 from src.trade_plan import advisory_position_size, build_trade_plan
 from src.veto_engine import apply_veto
 
@@ -52,6 +53,10 @@ PERSISTED_SETTING_KEYS = {
     "horizon_tp1_quantile",
     "horizon_tp2_quantile",
     "horizon_adverse_quantile",
+    "scalp_min_samples",
+    "scalp_cost_buffer",
+    "scalp_rsi_sell_floor",
+    "scalp_rsi_buy_ceiling",
     "risk_per_trade_pct",
     "long_plans_enabled",
     "short_plans_enabled",
@@ -138,6 +143,18 @@ def fmt_units(value) -> str:
     if not math.isfinite(value) or value <= 0:
         return "N/A"
     return f"{value:,.2f}"
+
+
+def fmt_metric(value, digits: int = 2) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except Exception:
+        return "N/A"
+    if not math.isfinite(value):
+        return "N/A"
+    return f"{value:.{digits}f}"
 
 
 def has_plan_levels(plan: dict) -> bool:
@@ -244,6 +261,20 @@ def settings_panel(settings: dict, presets: dict) -> dict:
         "Stop Loss adverse quantile", 0.50, 0.95, float(settings.get("horizon_adverse_quantile", 0.80)), 0.05
     )
 
+    st.sidebar.header("Scalp Gate")
+    settings["scalp_min_samples"] = st.sidebar.slider(
+        "Scalp minimum samples", 30, 200, int(settings.get("scalp_min_samples", 60)), 5
+    )
+    settings["scalp_cost_buffer"] = st.sidebar.slider(
+        "Scalp cost/slippage buffer", 0.00, 3.00, float(settings.get("scalp_cost_buffer", 0.40)), 0.05
+    )
+    settings["scalp_rsi_sell_floor"] = st.sidebar.slider(
+        "RSI sell floor", 20.0, 50.0, float(settings.get("scalp_rsi_sell_floor", 35.0)), 1.0
+    )
+    settings["scalp_rsi_buy_ceiling"] = st.sidebar.slider(
+        "RSI buy ceiling", 50.0, 80.0, float(settings.get("scalp_rsi_buy_ceiling", 65.0)), 1.0
+    )
+
     settings["long_plans_enabled"] = True
     settings["short_plans_enabled"] = True
     st.sidebar.caption("BUY and SELL plan processing is always enabled.")
@@ -339,6 +370,30 @@ def _display_horizon_table(forecasts) -> pd.DataFrame:
     return display
 
 
+def _display_scalp_table(scalp_decision) -> pd.DataFrame:
+    table = scalp_horizon_table(scalp_decision)
+    if table.empty:
+        return table
+    display = table.copy()
+    numeric_cols = [
+        "entry",
+        "stop_loss",
+        "take_profit_1",
+        "take_profit_2",
+        "tp1_move",
+        "tp2_move",
+        "sl_move",
+        "scalp_edge",
+        "tp1_hit_rate_pct",
+        "tp2_hit_rate_pct",
+        "sl_hit_rate_pct",
+    ]
+    for col in numeric_cols:
+        if col in display:
+            display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
+    return display
+
+
 settings = load_settings()
 presets = load_yaml(ROOT / "config/presets.yaml")
 settings = settings_panel(settings, presets)
@@ -380,6 +435,7 @@ active_plan = veto["final_action"] in ACTIONABLE
 status = plan_status(action, veto["final_action"], plan, candidate_action, candidate_note)
 display_plan = plan if has_plan_levels(plan) else candidate_plan
 horizon_forecasts = multi_horizon_forecast(bars, market, action, veto, candidate_action, settings)
+scalp_decision = scalp_gate(bars, market, scores, macro, kc, settings)
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
@@ -393,7 +449,7 @@ if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zo
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
 page = st.sidebar.radio(
-    "Page", ["Forecast Manager", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"]
+    "Page", ["Forecast Manager", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"]
 )
 
 source_cols = st.columns(4)
@@ -435,6 +491,45 @@ if page == "Forecast Manager":
     st.subheader("Price and indicators")
     st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
+elif page == "Scalp Gate":
+    st.subheader("Scalp Gate")
+    st.caption(
+        "Sniper mode: bias gives direction, 5m gives trigger, 15m checks danger. "
+        "KC and RSI are kept as live guards. TP2 is kept in the edge calculation with a small capped bonus. "
+        "Use Timeframe = 5m for true 5m and 15m scalp recommendations."
+    )
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Recommendation", scalp_decision.recommendation)
+    m2.metric("Side", scalp_decision.side)
+    m3.metric("Room ratio", fmt_metric(scalp_decision.room_ratio, 2))
+    m4.metric("RSI", fmt_metric(scalp_decision.rsi, 1))
+    m5.metric("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2))
+    if scalp_decision.reasons:
+        st.error("NO SCALP reasons: " + "; ".join(scalp_decision.reasons))
+    else:
+        st.success("Scalp Gate is open. Use manual execution only; no broker execution is connected.")
+    scalp_display = _display_scalp_table(scalp_decision)
+    scalp_cols = [
+        "horizon",
+        "side",
+        "status",
+        "entry",
+        "stop_loss",
+        "take_profit_1",
+        "take_profit_2",
+        "scalp_edge",
+        "tp1_hit_rate_pct",
+        "tp2_hit_rate_pct",
+        "sl_hit_rate_pct",
+        "train_samples",
+        "validation_samples",
+    ]
+    st.dataframe(scalp_display[[c for c in scalp_cols if c in scalp_display.columns]], use_container_width=True)
+    with st.expander("Scalp Gate audit"):
+        audit_cols = ["horizon", "side", "tp1_move", "tp2_move", "sl_move", "reason"]
+        st.dataframe(scalp_display[[c for c in audit_cols if c in scalp_display.columns]], use_container_width=True)
+    st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
+
 elif page == "Multi-Horizon Forecast":
     st.subheader("Multi-Horizon Forecast")
     st.caption(
@@ -473,7 +568,7 @@ elif page == "Multi-Horizon Forecast":
 elif page == "KC Squeeze":
     st.subheader("KC Squeeze module")
     st.json(kc)
-    cols = ["close", "trend_sma", "bb_upper", "bb_lower", "kc_upper", "kc_lower", "squeeze_on", "squeeze_fired", "kc_momentum"]
+    cols = ["close", "trend_sma", "bb_upper", "bb_lower", "kc_upper", "kc_lower", "squeeze_on", "squeeze_fired", "kc_momentum", "rsi"]
     st.dataframe(bars[[c for c in cols if c in bars.columns]].tail(30), use_container_width=True)
     st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
@@ -514,6 +609,10 @@ elif page == "Log Snapshot":
         "take_profit_1": plan_value(display_plan, "tp1"),
         "take_profit_2": plan_value(display_plan, "tp2"),
         "advisory_units_10k": advisory_qty if active_plan else None,
+        "scalp_recommendation": scalp_decision.recommendation,
+        "scalp_side": scalp_decision.side,
+        "scalp_room_ratio": scalp_decision.room_ratio,
+        "scalp_reasons": "; ".join(scalp_decision.reasons),
         "candidate_note": candidate_note,
         "plan_note": plan.get("note", ""),
     }
