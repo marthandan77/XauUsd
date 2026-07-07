@@ -96,7 +96,7 @@ def _select_index(options: list[str], value: str) -> int:
 
 
 def _sample_freq(settings: dict) -> str:
-    return {"15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
+    return {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
         str(settings.get("price_interval", "15m")), "15min"
     )
 
@@ -192,7 +192,7 @@ def settings_panel(settings: dict, presets: dict) -> dict:
         if st.sidebar.button("Load preset"):
             settings.update(presets[selected])
 
-    interval_options = ["15m", "30m", "1h", "4h", "1d"]
+    interval_options = ["5m", "15m", "30m", "1h", "4h", "1d"]
     period_options = ["7d", "30d", "60d", "6mo", "1y", "2y"]
     settings["price_interval"] = st.sidebar.selectbox(
         "Timeframe", interval_options, index=_select_index(interval_options, str(settings.get("price_interval", "15m")))
@@ -438,8 +438,9 @@ if page == "Forecast Manager":
 elif page == "Multi-Horizon Forecast":
     st.subheader("Multi-Horizon Forecast")
     st.caption(
-        "Actual-outcome mode: levels come from historical forward candles matching the current setup. "
-        "No ATR projection, drift multiplier, or synthetic forecast path is used. Entry uses the latest loaded price until IBKR bid/ask is added."
+        "Clean empirical mode: BUY and SELL levels come from actual historical forward candles matching the current setup. "
+        "No ATR projection, drift multiplier, or synthetic forecast path is used. Entry uses the latest loaded price until IBKR bid/ask is added. "
+        "Choose Timeframe = 5m to calculate true 5m, 15m, 1h, 4h, and Day horizons from 5-minute candles."
     )
     horizon_display = _display_horizon_table(horizon_forecasts)
     main_cols = [
@@ -447,6 +448,7 @@ elif page == "Multi-Horizon Forecast":
         "bars_ahead",
         "side",
         "status",
+        "engine_preferred",
         "entry",
         "stop_loss",
         "take_profit_1",
@@ -458,6 +460,7 @@ elif page == "Multi-Horizon Forecast":
     with st.expander("Audit details - actual historical values used"):
         detail_cols = [
             "horizon",
+            "side",
             "tp1_move",
             "tp2_move",
             "adverse_move",
