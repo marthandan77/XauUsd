@@ -25,6 +25,7 @@ from src.veto_engine import apply_veto
 ROOT = Path(__file__).resolve().parent
 RUNTIME_SETTINGS_PATH = ROOT / "data" / "runtime_settings.yaml"
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
+SCALP_ACTIONS = {"BUY SCALP", "SELL SCALP"}
 PERSISTED_SETTING_KEYS = {
     "price_interval",
     "price_period",
@@ -158,6 +159,16 @@ def fmt_metric(value, digits: int = 2) -> str:
     if not math.isfinite(value):
         return "N/A"
     return f"{value:.{digits}f}"
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(number):
+        return default
+    return number
 
 
 def has_plan_levels(plan: dict) -> bool:
@@ -350,9 +361,9 @@ def _scalp_row_explanation(row: pd.Series) -> str:
     status = str(row.get("status", ""))
     if status != "VALID":
         return _scalp_status_note(status)
-    edge = float(row.get("scalp_edge", 0.0) or 0.0)
-    tp1 = float(row.get("tp1_hit_rate_pct", 0.0) or 0.0)
-    sl = float(row.get("sl_hit_rate_pct", 0.0) or 0.0)
+    edge = _safe_float(row.get("scalp_edge"), 0.0)
+    tp1 = _safe_float(row.get("tp1_hit_rate_pct"), 0.0)
+    sl = _safe_float(row.get("sl_hit_rate_pct"), 0.0)
     if edge > 0 and tp1 > sl:
         return "Good edge."
     if edge < 0:
@@ -407,6 +418,63 @@ def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFr
     return pd.DataFrame(rows, columns=["Value", "Now", "Very short meaning"])
 
 
+def _scalp_signal_confidence(scalp_decision, scalp_display: pd.DataFrame) -> int:
+    if scalp_decision.recommendation not in SCALP_ACTIONS:
+        return 0
+
+    five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
+    fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
+    tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
+    sl_rate = _safe_float(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 0.0)
+    train_samples = _safe_float(_horizon_value(scalp_display, "5m", "train_samples"), 0.0)
+    validation_samples = _safe_float(_horizon_value(scalp_display, "5m", "validation_samples"), 0.0)
+    room_ratio = _safe_float(scalp_decision.room_ratio, 0.0)
+
+    confidence = 35.0
+    confidence += min(max(five_edge, 0.0) * 12.0, 20.0)
+    confidence += 15.0 if fifteen_edge >= 0 else 0.0
+    confidence += min(max(tp1_rate - sl_rate, 0.0) * 0.35, 20.0)
+    confidence += min(max(room_ratio - 1.5, 0.0) * 8.0, 10.0)
+    confidence += min(train_samples / 60.0, 1.0) * 5.0
+    confidence += min(validation_samples / 15.0, 1.0) * 5.0
+    confidence += 5.0
+    return int(max(0, min(round(confidence), 95)))
+
+
+def _show_scalp_scan_result(scalp_decision, scalp_display: pd.DataFrame) -> None:
+    confidence = _scalp_signal_confidence(scalp_decision, scalp_display)
+    five_status = _horizon_value(scalp_display, "5m", "status")
+    viable = scalp_decision.recommendation in SCALP_ACTIONS and confidence >= 70 and str(five_status) == "VALID"
+
+    if not viable:
+        st.error("NO GOOD SIGNAL")
+        reasons = list(getattr(scalp_decision, "reasons", []) or [])
+        if confidence and confidence < 70:
+            reasons.append(f"Scalp confidence {confidence}% is below 70%.")
+        if not reasons:
+            reasons.append("Scalp Gate did not produce a clean signal.")
+        st.write("Reason: " + "; ".join(reasons))
+        return
+
+    st.success(f"SCALP SIGNAL: {scalp_decision.recommendation}")
+    top = st.columns(5)
+    top[0].metric("Confidence", f"{confidence}%")
+    top[1].metric("Entry", fmt_price(_horizon_value(scalp_display, "5m", "entry")))
+    top[2].metric("Stop Loss", fmt_price(_horizon_value(scalp_display, "5m", "stop_loss")))
+    top[3].metric("Take Profit 1", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_1")))
+    top[4].metric("Take Profit 2", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_2")))
+
+    quality = st.columns(7)
+    quality[0].metric("5m Edge", fmt_metric(_horizon_value(scalp_display, "5m", "scalp_edge"), 2))
+    quality[1].metric("15m Edge", fmt_metric(_horizon_value(scalp_display, "15m", "scalp_edge"), 2))
+    quality[2].metric("TP1 Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 1))
+    quality[3].metric("TP2 Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1))
+    quality[4].metric("SL Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 1))
+    quality[5].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
+    quality[6].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
+    st.caption("Reason: 5m trigger valid. 15m danger check clear. Room, RSI and KC guards passed.")
+
+
 settings = load_settings()
 presets = load_yaml(ROOT / "config/presets.yaml")
 settings = settings_panel(settings, presets)
@@ -448,7 +516,12 @@ scalp_decision = scalp_gate(bars, market, scores, macro, kc, settings)
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
-    advisory_qty = advisory_position_size(account_equity=10000, risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0, entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0, stop=float(plan["stop"]))
+    advisory_qty = advisory_position_size(
+        account_equity=10000,
+        risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0,
+        entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0,
+        stop=float(plan["stop"]),
+    )
 
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
@@ -490,6 +563,12 @@ if page == "Forecast Manager":
     p6.metric("Advisory units @ $10k equity", fmt_units(advisory_qty))
     if status != f"Active {veto['final_action']}":
         st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
+
+    if not active_plan:
+        st.warning("No active trade plan. Wait for a clean actionable signal.")
+        if st.button("Scan scalp now", type="primary"):
+            scalp_display_for_scan = _display_scalp_table(scalp_decision)
+            _show_scalp_scan_result(scalp_decision, scalp_display_for_scan)
 
 elif page == "Scalp Gate":
     st.subheader("Scalp Gate")
