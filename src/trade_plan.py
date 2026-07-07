@@ -1,6 +1,20 @@
 from __future__ import annotations
 
 
+def _floor_below_price(price: float, target: float, minimum_gap: float) -> float:
+    """Keep a short-side target below current price."""
+    if target >= price:
+        return price - minimum_gap
+    return target
+
+
+def _sell_target_before_support(price: float, raw_target: float, support_level: float, atr: float, buffer_atr: float) -> float:
+    """For shorts, avoid aiming far below nearby support. Exit before the level instead."""
+    if support_level < price:
+        return max(raw_target, support_level + buffer_atr * atr)
+    return raw_target
+
+
 def build_trade_plan(action: str, market, settings: dict) -> dict:
     price = float(market.price)
     atr = float(market.atr)
@@ -28,8 +42,21 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
     if action == "SELL PLAN" and bool(settings.get("short_plans_enabled", False)):
         stop = max(float(market.swing_high), price + stop_mult * atr)
         risk = max(stop - price, 0.01)
-        tp1 = price - min(tp_mult, tp1_r * stop_mult) * atr
-        tp2 = price - max(tp_mult, tp2_r * stop_mult) * atr
+
+        # Short targets are intentionally tighter than the old generic ATR target.
+        # The old formula used 4.5 ATR for TP1 and 6.0 ATR for TP2 with default settings,
+        # which was too far for XAU/USD scalp-style bearish plans.
+        sell_tp1_mult = float(settings.get("sell_tp1_atr_multiplier", 1.25))
+        sell_tp2_mult = float(settings.get("sell_tp2_atr_multiplier", 2.25))
+        support_buffer = float(settings.get("sell_support_buffer_atr", 0.15))
+
+        tp1_raw = price - sell_tp1_mult * atr
+        tp2_raw = price - sell_tp2_mult * atr
+        tp1 = _sell_target_before_support(price, tp1_raw, float(market.swing_low), atr, support_buffer)
+        tp2 = _sell_target_before_support(price, tp2_raw, float(market.support), atr, support_buffer)
+        tp1 = _floor_below_price(price, tp1, 0.50 * atr)
+        tp2 = min(_floor_below_price(price, tp2, 1.00 * atr), tp1 - 0.50 * atr)
+
         return {
             "side": "sell_advisory",
             "entry_zone_low": price - 0.10 * atr,
@@ -38,7 +65,7 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
             "tp1": tp1,
             "tp2": tp2,
             "risk": risk,
-            "note": "Active bearish advisory plan. Shorts must be explicitly enabled.",
+            "note": "Active bearish advisory plan. SELL TP uses reachable ATR/support-aware targets.",
         }
 
     if action == "EXIT LONG / AVOID BUY":
