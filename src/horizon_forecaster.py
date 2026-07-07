@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import pandas as pd
 
-from src.forecast_labels import HORIZONS, add_forward_outcomes
+from src.forecast_labels import add_forward_outcomes, horizons_for_interval, interval_minutes
 
 
 @dataclass
@@ -14,6 +14,7 @@ class HorizonForecast:
     bars_ahead: int
     side: str
     status: str
+    engine_preferred: bool
     entry: float | None
     stop_loss: float | None
     take_profit_1: float | None
@@ -38,6 +39,10 @@ def _finite_float(value, default: float | None = None) -> float | None:
     if not np.isfinite(number):
         return default
     return number
+
+
+def _bars_per_day(settings: dict) -> int:
+    return max(int(1440 / interval_minutes(str(settings.get("price_interval", "15m")))), 1)
 
 
 def _range_zone(value: float, lower: float, upper: float) -> str:
@@ -70,7 +75,7 @@ def _momentum_state(row: pd.Series) -> str:
     return "flat_momentum"
 
 
-def _recommended_side(action: str, final_action: str, candidate_action: str) -> tuple[str, str, str]:
+def _preferred_side(action: str, final_action: str, candidate_action: str) -> tuple[str | None, str, str]:
     if final_action == "BUY PLAN":
         return "BUY", "ACTIVE", "Final action is BUY PLAN."
     if final_action == "SELL PLAN":
@@ -79,12 +84,19 @@ def _recommended_side(action: str, final_action: str, candidate_action: str) -> 
         return "BUY", "CANDIDATE_ONLY", "Current engine only has a BUY candidate/rejected plan; use as preview, not execution."
     if candidate_action == "SELL CANDIDATE" or action == "SELL PLAN":
         return "SELL", "CANDIDATE_ONLY", "Current engine only has a SELL candidate/rejected plan; use as preview, not execution."
-    return "HOLD", "NO_TRADE", "No actionable or candidate side from the current engine."
+    return None, "REFERENCE_ONLY", "Current engine has no BUY/SELL side; empirical levels are reference only."
+
+
+def _side_status(side: str, preferred_side: str | None, preferred_status: str, preferred_reason: str) -> tuple[str, bool, str]:
+    if side == preferred_side:
+        return preferred_status, True, preferred_reason
+    return "REFERENCE_ONLY", False, f"{side} side is empirical reference only; current engine did not select this side."
 
 
 def _add_setup_columns(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
     out = df.copy()
-    lookback_window = max(80, int(settings.get("lookback_days", 7)) * 96)
+    bars_per_day = _bars_per_day(settings)
+    lookback_window = max(80, int(settings.get("lookback_days", 7)) * bars_per_day)
     min_periods = min(lookback_window, 80)
     rolling_high = out["high"].rolling(lookback_window, min_periods=min_periods).max()
     rolling_low = out["low"].rolling(lookback_window, min_periods=min_periods).min()
@@ -128,6 +140,7 @@ def _level_forecast(
     sample: pd.DataFrame,
     side: str,
     status: str,
+    engine_preferred: bool,
     entry: float,
     setup_label: str,
     settings: dict,
@@ -140,6 +153,7 @@ def _level_forecast(
             bars_ahead=bars_ahead,
             side=side,
             status="INSUFFICIENT_DATA",
+            engine_preferred=engine_preferred,
             entry=entry,
             stop_loss=None,
             take_profit_1=None,
@@ -176,6 +190,7 @@ def _level_forecast(
             bars_ahead=bars_ahead,
             side=side,
             status="NO_EDGE",
+            engine_preferred=engine_preferred,
             entry=entry,
             stop_loss=None,
             take_profit_1=None,
@@ -205,6 +220,7 @@ def _level_forecast(
         bars_ahead=bars_ahead,
         side=side,
         status=status,
+        engine_preferred=engine_preferred,
         entry=entry,
         stop_loss=stop_loss,
         take_profit_1=take_profit_1,
@@ -230,7 +246,7 @@ def multi_horizon_forecast(
     candidate_action: str,
     settings: dict,
 ) -> list[HorizonForecast]:
-    """Return data-derived forecast levels for 30m, 1h, 4h, and 8h.
+    """Return clean empirical BUY and SELL forecast levels for available horizons.
 
     The function uses only actual historical forward outcomes from the loaded OHLC
     data. It does not use ATR projection multipliers, drift assumptions, or synthetic
@@ -240,49 +256,36 @@ def multi_horizon_forecast(
     if bars.empty:
         return []
 
-    final_action = str(veto.get("final_action", "HOLD"))
-    side, status, side_reason = _recommended_side(action, final_action, candidate_action)
-    entry = float(market.price)
-    if side == "HOLD":
-        return [
-            HorizonForecast(
-                horizon=label,
-                bars_ahead=bars_ahead,
-                side=side,
-                status=status,
-                entry=entry,
-                stop_loss=None,
-                take_profit_1=None,
-                take_profit_2=None,
-                tp1_move=None,
-                tp2_move=None,
-                adverse_move=None,
-                historical_direction_probability_pct=None,
-                sample_count=0,
-                matching_setup="none",
-                reason=side_reason,
-            )
-            for label, bars_ahead in HORIZONS.items()
-        ]
+    horizons = horizons_for_interval(str(settings.get("price_interval", "15m")))
+    if not horizons:
+        return []
 
-    labeled = _add_setup_columns(add_forward_outcomes(bars, HORIZONS), settings)
+    final_action = str(veto.get("final_action", "HOLD"))
+    preferred_side, preferred_status, preferred_reason = _preferred_side(action, final_action, candidate_action)
+    entry = float(market.price)
+
+    labeled = _add_setup_columns(add_forward_outcomes(bars, horizons), settings)
     latest_row = bars.iloc[-1]
     setup, setup_label = _current_setup(latest_row, market, settings)
 
     forecasts: list[HorizonForecast] = []
-    for label, bars_ahead in HORIZONS.items():
-        side_key = side.lower()
-        required = [
-            f"{label}_{side_key}_profit",
-            f"{label}_{side_key}_adverse",
-            f"{label}_future_close_change",
-            "_range_zone",
-            "_trend_state",
-            "_momentum_state",
-            "_squeeze_state",
-        ]
-        sample = _matching_sample(labeled.iloc[:-bars_ahead].copy(), setup, required)
-        forecasts.append(_level_forecast(label, bars_ahead, sample, side, status, entry, setup_label, settings, side_reason))
+    for label, bars_ahead in horizons.items():
+        for side in ("BUY", "SELL"):
+            side_status, engine_preferred, side_reason = _side_status(side, preferred_side, preferred_status, preferred_reason)
+            side_key = side.lower()
+            required = [
+                f"{label}_{side_key}_profit",
+                f"{label}_{side_key}_adverse",
+                f"{label}_future_close_change",
+                "_range_zone",
+                "_trend_state",
+                "_momentum_state",
+                "_squeeze_state",
+            ]
+            sample = _matching_sample(labeled.iloc[:-bars_ahead].copy(), setup, required)
+            forecasts.append(
+                _level_forecast(label, bars_ahead, sample, side, side_status, engine_preferred, entry, setup_label, settings, side_reason)
+            )
     return forecasts
 
 
