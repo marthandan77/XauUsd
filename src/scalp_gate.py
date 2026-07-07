@@ -350,14 +350,18 @@ def scalp_gate(bars: pd.DataFrame, market, scores: dict, macro: dict, kc: dict, 
 
     if five is None or five.status != "VALID":
         reasons.append("5m scalp edge is unavailable or invalid.")
-    elif five.scalp_edge is None or five.scalp_edge <= min_edge:
+    elif five.scalp_edge is None:
+        reasons.append("5m scalp edge is unavailable.")
+    elif five.scalp_edge <= min_edge:
         reasons.append(f"5m scalp edge {five.scalp_edge:.2f} is not above minimum {min_edge:.2f}.")
     elif (five.tp1_hit_rate_pct or 0.0) <= (five.sl_hit_rate_pct or 0.0):
         reasons.append("5m TP1 hit rate is not better than SL hit rate.")
 
     if fifteen is None or fifteen.status != "VALID":
         reasons.append("15m danger check is unavailable or invalid.")
-    elif fifteen.scalp_edge is None or fifteen.scalp_edge < 0:
+    elif fifteen.scalp_edge is None:
+        reasons.append("15m danger check edge is unavailable.")
+    elif fifteen.scalp_edge < 0:
         reasons.append(f"15m danger check is negative: {fifteen.scalp_edge:.2f}.")
 
     recommendation = "NO SCALP"
