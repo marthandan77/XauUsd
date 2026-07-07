@@ -152,6 +152,15 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["atr_period"] = st.sidebar.slider("ATR period", 5, 50, int(settings.get("atr_period", 14)))
     settings["atr_stop_multiplier"] = st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1)
     settings["atr_tp_multiplier"] = st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1)
+    settings["sell_tp1_atr_multiplier"] = st.sidebar.slider(
+        "Sell Take Profit 1 ATR", 0.50, 3.00, float(settings.get("sell_tp1_atr_multiplier", 1.25)), 0.05
+    )
+    settings["sell_tp2_atr_multiplier"] = st.sidebar.slider(
+        "Sell Take Profit 2 ATR", 0.75, 5.00, float(settings.get("sell_tp2_atr_multiplier", 2.25)), 0.05
+    )
+    settings["sell_support_buffer_atr"] = st.sidebar.slider(
+        "Sell support buffer ATR", 0.00, 1.00, float(settings.get("sell_support_buffer_atr", 0.15)), 0.05
+    )
     settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
     settings["long_plans_enabled"] = True
     settings["short_plans_enabled"] = True
@@ -303,10 +312,10 @@ if page == "Forecast Manager":
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("Entry zone low", fmt_price(plan_value(display_plan, "entry_zone_low")))
     p2.metric("Entry zone high", fmt_price(plan_value(display_plan, "entry_zone_high")))
-    p3.metric("Guard level", fmt_price(plan_value(display_plan, "stop")))
-    p4.metric("Target 1", fmt_price(plan_value(display_plan, "tp1")))
+    p3.metric("Stop Loss", fmt_price(plan_value(display_plan, "stop")))
+    p4.metric("Take Profit 1", fmt_price(plan_value(display_plan, "tp1")))
     p5, p6 = st.columns(2)
-    p5.metric("Target 2", fmt_price(plan_value(display_plan, "tp2")))
+    p5.metric("Take Profit 2", fmt_price(plan_value(display_plan, "tp2")))
     p6.metric("Advisory units @ $10k equity", fmt_units(advisory_qty))
     if status != f"Active {veto['final_action']}":
         st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
@@ -353,9 +362,9 @@ elif page == "Log Snapshot":
         "veto_reasons": "; ".join(veto["reasons"]),
         "entry_zone_low": plan_value(display_plan, "entry_zone_low"),
         "entry_zone_high": plan_value(display_plan, "entry_zone_high"),
-        "guard_level": plan_value(display_plan, "stop"),
-        "target_1": plan_value(display_plan, "tp1"),
-        "target_2": plan_value(display_plan, "tp2"),
+        "stop_loss": plan_value(display_plan, "stop"),
+        "take_profit_1": plan_value(display_plan, "tp1"),
+        "take_profit_2": plan_value(display_plan, "tp2"),
         "advisory_units_10k": advisory_qty if active_plan else None,
         "candidate_note": candidate_note,
         "plan_note": plan.get("note", ""),
