@@ -17,6 +17,7 @@ from src.indicators import add_indicators
 from src.kc_squeeze_engine import kc_squeeze_summary
 from src.macro_engine import macro_context
 from src.market_map import build_market_map
+from src.multi_timeframe import multi_timeframe_confirmation, multi_timeframe_table
 from src.range_model import price_bands
 from src.regime_engine import classify_regime
 from src.scalp_gate import scalp_gate, scalp_horizon_table
@@ -28,43 +29,15 @@ RUNTIME_SETTINGS_PATH = ROOT / "data" / "runtime_settings.yaml"
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
 SCALP_ACTIONS = {"BUY SCALP", "SELL SCALP"}
 PERSISTED_SETTING_KEYS = {
-    "price_interval",
-    "price_period",
-    "data_mode",
-    "macro_bias",
-    "buy_threshold",
-    "sell_threshold",
-    "wait_threshold",
-    "atr_multiplier",
-    "min_reward_risk",
-    "middle_range_lower_pct",
-    "middle_range_upper_pct",
-    "kc_squeeze_enabled",
-    "bb_length",
-    "bb_mult",
-    "kc_length",
-    "kc_mult",
-    "trend_length",
-    "atr_period",
-    "atr_stop_multiplier",
-    "atr_tp_multiplier",
-    "sell_tp1_atr_multiplier",
-    "sell_tp2_atr_multiplier",
-    "sell_support_buffer_atr",
-    "horizon_min_samples",
-    "horizon_tp1_quantile",
-    "horizon_tp2_quantile",
-    "horizon_adverse_quantile",
-    "scalp_min_samples",
-    "scalp_cost_buffer",
-    "scalp_rsi_sell_floor",
-    "scalp_rsi_buy_ceiling",
-    "risk_per_trade_pct",
-    "long_plans_enabled",
-    "short_plans_enabled",
-    "show_bollinger_bands",
-    "show_keltner_channels",
-    "news_block_manual",
+    "price_interval", "price_period", "data_mode", "macro_bias",
+    "buy_threshold", "sell_threshold", "wait_threshold", "atr_multiplier", "min_reward_risk",
+    "middle_range_lower_pct", "middle_range_upper_pct", "kc_squeeze_enabled",
+    "bb_length", "bb_mult", "kc_length", "kc_mult", "trend_length", "atr_period",
+    "atr_stop_multiplier", "atr_tp_multiplier", "sell_tp1_atr_multiplier", "sell_tp2_atr_multiplier",
+    "sell_support_buffer_atr", "horizon_min_samples", "horizon_tp1_quantile", "horizon_tp2_quantile",
+    "horizon_adverse_quantile", "scalp_min_samples", "scalp_cost_buffer", "scalp_rsi_sell_floor",
+    "scalp_rsi_buy_ceiling", "risk_per_trade_pct", "long_plans_enabled", "short_plans_enabled",
+    "show_bollinger_bands", "show_keltner_channels", "news_block_manual",
 }
 
 st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
@@ -108,6 +81,83 @@ def _sample_freq(settings: dict) -> str:
     )
 
 
+def fmt_price(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except Exception:
+        return "N/A"
+    return f"{value:,.2f}" if math.isfinite(value) else "N/A"
+
+
+def fmt_units(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except Exception:
+        return "N/A"
+    return f"{value:,.2f}" if math.isfinite(value) and value > 0 else "N/A"
+
+
+def fmt_metric(value, digits: int = 2) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except Exception:
+        return "N/A"
+    return f"{value:.{digits}f}" if math.isfinite(value) else "N/A"
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except Exception:
+        return default
+    return number if math.isfinite(number) else default
+
+
+def has_plan_levels(plan: dict) -> bool:
+    return plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None
+
+
+def plan_value(plan: dict, key: str):
+    return plan.get(key) if has_plan_levels(plan) else None
+
+
+def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
+    threshold = int(settings.get("forecast_threshold", 65))
+    bias = str(scores.get("bias", "mixed"))
+    bull_score = int(scores.get("bull_score", 0))
+    bear_score = int(scores.get("bear_score", 0))
+
+    if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
+        plan = build_trade_plan("BUY PLAN", market, settings)
+        plan["note"] = "Bullish forecast candidate. Use only if final action is BUY PLAN and veto filters are clean."
+        return "BUY CANDIDATE", plan, "Bullish candidate levels shown because bull forecast is above forecast threshold."
+
+    if bias == "bearish" and bear_score >= threshold:
+        preview_settings = dict(settings)
+        preview_settings["short_plans_enabled"] = True
+        plan = build_trade_plan("SELL PLAN", market, preview_settings)
+        plan["note"] = "Bearish forecast candidate. Use only if final action is SELL PLAN and veto filters are clean."
+        return "SELL CANDIDATE", plan, "Bearish candidate levels shown because bear forecast is above forecast threshold."
+
+    return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "No forecast candidate above threshold."}, ""
+
+
+def plan_status(action: str, final_action: str, plan: dict, candidate_action: str) -> str:
+    if final_action in ACTIONABLE:
+        return f"Active {final_action}"
+    if action in ACTIONABLE and has_plan_levels(plan):
+        return f"Rejected {action}"
+    if candidate_action != "NO CANDIDATE":
+        return candidate_action
+    return "No entry plan"
+
+
 def refresh_panel() -> None:
     st.sidebar.header("Refresh")
     if st.sidebar.button("Manual refresh now", type="primary"):
@@ -126,96 +176,6 @@ def persistence_panel(settings: dict) -> None:
         st.rerun()
 
 
-def fmt_price(value) -> str:
-    if value is None:
-        return "N/A"
-    try:
-        value = float(value)
-    except Exception:
-        return "N/A"
-    if not math.isfinite(value):
-        return "N/A"
-    return f"{value:,.2f}"
-
-
-def fmt_units(value) -> str:
-    if value is None:
-        return "N/A"
-    try:
-        value = float(value)
-    except Exception:
-        return "N/A"
-    if not math.isfinite(value) or value <= 0:
-        return "N/A"
-    return f"{value:,.2f}"
-
-
-def fmt_metric(value, digits: int = 2) -> str:
-    if value is None:
-        return "N/A"
-    try:
-        value = float(value)
-    except Exception:
-        return "N/A"
-    if not math.isfinite(value):
-        return "N/A"
-    return f"{value:.{digits}f}"
-
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-    except Exception:
-        return default
-    if not math.isfinite(number):
-        return default
-    return number
-
-
-def has_plan_levels(plan: dict) -> bool:
-    return plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None
-
-
-def plan_value(plan: dict, key: str):
-    if not has_plan_levels(plan):
-        return None
-    return plan.get(key)
-
-
-def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
-    threshold = int(settings.get("forecast_threshold", 65))
-    bias = str(scores.get("bias", "mixed"))
-    bull_score = int(scores.get("bull_score", 0))
-    bear_score = int(scores.get("bear_score", 0))
-
-    if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
-        plan = build_trade_plan("BUY PLAN", market, settings)
-        plan["note"] = "Bullish forecast candidate. Use only if final action is BUY PLAN and veto filters are clean."
-        return "BUY CANDIDATE", plan, "Bullish candidate levels shown because bull forecast is above forecast threshold."
-
-    if bias == "bearish" and bear_score >= threshold:
-        preview_settings = dict(settings)
-        preview_settings["short_plans_enabled"] = True
-        plan = build_trade_plan("SELL PLAN", market, preview_settings)
-        if bool(settings.get("short_plans_enabled", False)):
-            plan["note"] = "Bearish forecast candidate. Use only if final action is SELL PLAN and veto filters are clean."
-            return "SELL CANDIDATE", plan, "Bearish candidate levels shown because bear forecast is above forecast threshold."
-        plan["note"] = "Bearish forecast preview only. Short plans are disabled, so this is not an active SELL PLAN."
-        return "SELL PREVIEW ONLY", plan, "Bearish forecast met, but short plans are disabled in settings. Enable short plans for active SELL entry/TP/SL."
-
-    return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "No forecast candidate above threshold."}, ""
-
-
-def plan_status(action: str, final_action: str, plan: dict, candidate_action: str, candidate_note: str) -> str:
-    if final_action in ACTIONABLE:
-        return f"Active {final_action}"
-    if action in ACTIONABLE and has_plan_levels(plan):
-        return f"Rejected {action}"
-    if candidate_action != "NO CANDIDATE":
-        return candidate_action
-    return "No entry plan"
-
-
 def settings_panel(settings: dict, presets: dict) -> dict:
     st.sidebar.header("Forecast controls")
     if presets:
@@ -225,13 +185,8 @@ def settings_panel(settings: dict, presets: dict) -> dict:
 
     interval_options = ["5m", "15m", "30m", "1h", "4h", "1d"]
     period_options = ["7d", "30d", "60d", "6mo", "1y", "2y"]
-    settings["price_interval"] = st.sidebar.selectbox(
-        "Timeframe", interval_options, index=_select_index(interval_options, str(settings.get("price_interval", "15m")))
-    )
-    settings["price_period"] = st.sidebar.selectbox(
-        "Lookback period", period_options, index=_select_index(period_options, str(settings.get("price_period", "30d")))
-    )
-
+    settings["price_interval"] = st.sidebar.selectbox("Timeframe", interval_options, index=_select_index(interval_options, str(settings.get("price_interval", "15m"))))
+    settings["price_period"] = st.sidebar.selectbox("Lookback period", period_options, index=_select_index(period_options, str(settings.get("price_period", "30d"))))
     settings["buy_threshold"] = st.sidebar.slider("Bull threshold", 50, 95, int(settings.get("buy_threshold", 78)))
     settings["sell_threshold"] = st.sidebar.slider("Bear threshold", 50, 95, int(settings.get("sell_threshold", 78)))
     settings["wait_threshold"] = st.sidebar.slider("Watch threshold", 40, 90, int(settings.get("wait_threshold", 60)))
@@ -250,15 +205,9 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["atr_period"] = st.sidebar.slider("ATR period", 5, 50, int(settings.get("atr_period", 14)))
     settings["atr_stop_multiplier"] = st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1)
     settings["atr_tp_multiplier"] = st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1)
-    settings["sell_tp1_atr_multiplier"] = st.sidebar.slider(
-        "Sell Take Profit 1 ATR", 0.50, 3.00, float(settings.get("sell_tp1_atr_multiplier", 1.75)), 0.05
-    )
-    settings["sell_tp2_atr_multiplier"] = st.sidebar.slider(
-        "Sell Take Profit 2 ATR", 0.75, 5.00, float(settings.get("sell_tp2_atr_multiplier", 3.25)), 0.05
-    )
-    settings["sell_support_buffer_atr"] = st.sidebar.slider(
-        "Sell support buffer ATR", 0.00, 1.00, float(settings.get("sell_support_buffer_atr", 0.10)), 0.05
-    )
+    settings["sell_tp1_atr_multiplier"] = st.sidebar.slider("Sell Take Profit 1 ATR", 0.50, 3.00, float(settings.get("sell_tp1_atr_multiplier", 1.75)), 0.05)
+    settings["sell_tp2_atr_multiplier"] = st.sidebar.slider("Sell Take Profit 2 ATR", 0.75, 5.00, float(settings.get("sell_tp2_atr_multiplier", 3.25)), 0.05)
+    settings["sell_support_buffer_atr"] = st.sidebar.slider("Sell support buffer ATR", 0.00, 1.00, float(settings.get("sell_support_buffer_atr", 0.10)), 0.05)
     settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
 
     st.sidebar.header("Empirical Horizon Forecast")
@@ -272,7 +221,6 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["scalp_cost_buffer"] = st.sidebar.slider("Scalp cost/slippage buffer", 0.00, 3.00, float(settings.get("scalp_cost_buffer", 0.40)), 0.05)
     settings["scalp_rsi_sell_floor"] = st.sidebar.slider("RSI sell floor", 20.0, 50.0, float(settings.get("scalp_rsi_sell_floor", 35.0)), 1.0)
     settings["scalp_rsi_buy_ceiling"] = st.sidebar.slider("RSI buy ceiling", 50.0, 80.0, float(settings.get("scalp_rsi_buy_ceiling", 65.0)), 1.0)
-
     settings["long_plans_enabled"] = True
     settings["short_plans_enabled"] = True
     st.sidebar.caption("BUY and SELL plan processing is always enabled.")
@@ -285,11 +233,7 @@ def settings_panel(settings: dict, presets: dict) -> dict:
 def load_bars(settings: dict) -> FeedResult:
     st.sidebar.header("Data")
     data_mode_options = ["Twelve Data API", "CSV upload", "Sample"]
-    data_mode = st.sidebar.radio(
-        "Data mode",
-        data_mode_options,
-        index=_select_index(data_mode_options, str(settings.get("data_mode", "Twelve Data API"))),
-    )
+    data_mode = st.sidebar.radio("Data mode", data_mode_options, index=_select_index(data_mode_options, str(settings.get("data_mode", "Twelve Data API"))))
     settings["data_mode"] = data_mode
     if data_mode == "CSV upload":
         uploaded = st.sidebar.file_uploader("Upload OHLC CSV", type=["csv"])
@@ -339,8 +283,7 @@ def _display_horizon_table(forecasts) -> pd.DataFrame:
     if table.empty:
         return table
     display = table.copy()
-    price_cols = ["entry", "stop_loss", "take_profit_1", "take_profit_2", "tp1_move", "tp2_move", "adverse_move"]
-    for col in price_cols:
+    for col in ["entry", "stop_loss", "take_profit_1", "take_profit_2", "tp1_move", "tp2_move", "adverse_move"]:
         if col in display:
             display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
     if "historical_direction_probability_pct" in display:
@@ -377,8 +320,7 @@ def _display_scalp_table(scalp_decision) -> pd.DataFrame:
     if table.empty:
         return table
     display = table.copy()
-    numeric_cols = ["entry", "stop_loss", "take_profit_1", "take_profit_2", "tp1_move", "tp2_move", "sl_move", "scalp_edge", "tp1_hit_rate_pct", "tp2_hit_rate_pct", "sl_hit_rate_pct"]
-    for col in numeric_cols:
+    for col in ["entry", "stop_loss", "take_profit_1", "take_profit_2", "tp1_move", "tp2_move", "sl_move", "scalp_edge", "tp1_hit_rate_pct", "tp2_hit_rate_pct", "sl_hit_rate_pct"]:
         if col in display:
             display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
     display["explanation"] = display.apply(_scalp_row_explanation, axis=1)
@@ -392,16 +334,14 @@ def _horizon_value(scalp_display: pd.DataFrame, horizon: str, column: str):
     if row.empty:
         return None
     value = row.iloc[0].get(column)
-    if pd.isna(value):
-        return None
-    return value
+    return None if pd.isna(value) else value
 
 
 def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFrame:
     rows = [
         ("Recommendation", scalp_decision.recommendation, "Final answer."),
         ("Side", scalp_decision.side, "Allowed direction."),
-        ("Room ratio", fmt_metric(scalp_decision.room_ratio, 2), "Space vs risk."),
+        ("Room ratio", fmt_metric(scalp_decision.room_ratio, 2), "Scalp room / scalp risk."),
         ("RSI", fmt_metric(scalp_decision.rsi, 1), "Overbought/oversold guard."),
         ("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2), "Negative=down, positive=up."),
         ("5m scalp edge", fmt_metric(_horizon_value(scalp_display, "5m", "scalp_edge"), 2), "Trigger. >0 good."),
@@ -409,8 +349,6 @@ def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFr
         ("TP1 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 1), "Fast target odds."),
         ("TP2 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1), "Stretch target odds."),
         ("SL hit %", fmt_metric(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 1), "Stop-loss odds."),
-        ("Train samples", _horizon_value(scalp_display, "5m", "train_samples") or "N/A", "Old samples used."),
-        ("Validation samples", _horizon_value(scalp_display, "5m", "validation_samples") or "N/A", "Recent samples tested."),
         ("Entry", fmt_price(_horizon_value(scalp_display, "5m", "entry")), "Current price used."),
         ("Stop Loss", fmt_price(_horizon_value(scalp_display, "5m", "stop_loss")), "Invalidation price."),
         ("Take Profit 1", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_1")), "Fast target."),
@@ -422,7 +360,6 @@ def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFr
 def _scalp_signal_confidence(scalp_decision, scalp_display: pd.DataFrame) -> int:
     if scalp_decision.recommendation not in SCALP_ACTIONS:
         return 0
-
     five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
     fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
     tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
@@ -430,7 +367,6 @@ def _scalp_signal_confidence(scalp_decision, scalp_display: pd.DataFrame) -> int
     train_samples = _safe_float(_horizon_value(scalp_display, "5m", "train_samples"), 0.0)
     validation_samples = _safe_float(_horizon_value(scalp_display, "5m", "validation_samples"), 0.0)
     room_ratio = _safe_float(scalp_decision.room_ratio, 0.0)
-
     confidence = 35.0
     confidence += min(max(five_edge, 0.0) * 12.0, 20.0)
     confidence += 15.0 if fifteen_edge >= 0 else 7.0
@@ -456,7 +392,6 @@ def _show_scalp_scan_result(scalp_decision, scalp_display: pd.DataFrame) -> None
     confidence = _scalp_signal_confidence(scalp_decision, scalp_display)
     five_status = _horizon_value(scalp_display, "5m", "status")
     viable = scalp_decision.recommendation in SCALP_ACTIONS and str(five_status) == "VALID"
-
     five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
     fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
     tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
@@ -477,7 +412,6 @@ def _show_scalp_scan_result(scalp_decision, scalp_display: pd.DataFrame) -> None
             cols[5].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
             st.caption("No entry, SL or TP shown because at least one filter is still blocking the scalp.")
             return
-
         st.error("NO GOOD SIGNAL")
         if not reasons:
             reasons.append("Scalp Gate did not produce a clean signal.")
@@ -492,7 +426,6 @@ def _show_scalp_scan_result(scalp_decision, scalp_display: pd.DataFrame) -> None
     top[2].metric("Stop Loss", fmt_price(_horizon_value(scalp_display, "5m", "stop_loss")))
     top[3].metric("Take Profit 1", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_1")))
     top[4].metric("Take Profit 2", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_2")))
-
     quality_cols = st.columns(7)
     quality_cols[0].metric("5m Edge", fmt_metric(five_edge, 2))
     quality_cols[1].metric("15m Edge", fmt_metric(fifteen_edge, 2))
@@ -541,11 +474,12 @@ bands = price_bands(market, regime)
 veto = apply_veto(action, plan, market, regime, macro, settings)
 summary = explain(regime, scores, veto, market, macro)
 active_plan = veto["final_action"] in ACTIONABLE
-status = plan_status(action, veto["final_action"], plan, candidate_action, candidate_note)
+status = plan_status(action, veto["final_action"], plan, candidate_action)
 display_plan = plan if has_plan_levels(plan) else candidate_plan
 horizon_forecasts = multi_horizon_forecast(bars, market, action, veto, candidate_action, settings)
 scalp_decision = scalp_gate(bars, market, scores, macro, kc, settings)
 bias_validation = bias_validation_summary(bars, market, scores, settings)
+mtf_confirmation = multi_timeframe_confirmation(bars, settings, macro)
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
@@ -558,7 +492,10 @@ if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zo
 
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio("Page", ["Forecast Manager", "Bull/Bear Validation", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
+page = st.sidebar.radio(
+    "Page",
+    ["Forecast Manager", "Bull/Bear Validation", "MTF Confirmation", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"],
+)
 
 source_cols = st.columns(4)
 source_cols[0].metric("Data source", feed.source)
@@ -582,6 +519,7 @@ if page == "Forecast Manager":
     s4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
     st.info(summary)
     st.caption(f"Bull/Bear validation: {bias_validation.get('overall_verdict', 'NO EDGE')} | Side: {bias_validation.get('side', 'NONE')}")
+    st.caption(f"MTF confirmation: {mtf_confirmation.get('verdict', 'INCOMPLETE')} | Side: {mtf_confirmation.get('side', 'NONE')}")
     st.caption(plan.get("note", ""))
     if candidate_note and (not has_plan_levels(plan) or veto["final_action"] not in ACTIONABLE):
         st.warning(candidate_note)
@@ -597,7 +535,6 @@ if page == "Forecast Manager":
     p6.metric("Advisory units @ $10k equity", fmt_units(advisory_qty))
     if status != f"Active {veto['final_action']}":
         st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
-
     if not active_plan:
         st.warning("No active trade plan. Wait for a clean actionable signal.")
         if st.button("Scan scalp now", type="primary"):
@@ -619,9 +556,22 @@ elif page == "Bull/Bear Validation":
     with st.expander("Current matched setup"):
         st.json(bias_validation.get("setup", {}))
 
+elif page == "MTF Confirmation":
+    st.subheader("Multi-Timeframe Confirmation")
+    st.caption("Phase 4: 5m is trigger, 15m is danger check, 1h is structure. Use Timeframe = 5m for full confirmation.")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("MTF verdict", mtf_confirmation.get("verdict", "INCOMPLETE"))
+    m2.metric("MTF side", mtf_confirmation.get("side", "NONE"))
+    m3.metric("Source timeframe", mtf_confirmation.get("source_interval", "N/A"))
+    if mtf_confirmation.get("reasons"):
+        st.warning("; ".join(mtf_confirmation.get("reasons", [])))
+    mtf_display = multi_timeframe_table(mtf_confirmation)
+    mtf_cols = ["timeframe", "role", "status", "bias", "action", "regime", "confidence", "kc_state", "kc_momentum", "rsi", "price", "reason"]
+    st.dataframe(mtf_display[[c for c in mtf_cols if c in mtf_display.columns]], use_container_width=True, hide_index=True)
+
 elif page == "Scalp Gate":
     st.subheader("Scalp Gate")
-    st.caption("Sniper mode: bias gives direction, 5m gives trigger, 15m checks danger. KC and RSI are kept as live guards. TP2 is kept in the edge calculation with a small capped bonus. Use Timeframe = 5m for true 5m and 15m scalp recommendations.")
+    st.caption("Sniper mode: bias gives direction, 5m gives trigger, 15m checks danger. KC and RSI are live guards. TP2 stays in the edge calculation.")
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Recommendation", scalp_decision.recommendation); m1.caption("Final answer.")
     m2.metric("Side", scalp_decision.side); m2.caption("Allowed direction.")
@@ -644,7 +594,7 @@ elif page == "Scalp Gate":
 
 elif page == "Multi-Horizon Forecast":
     st.subheader("Multi-Horizon Forecast")
-    st.caption("Clean empirical mode: BUY and SELL levels come from actual historical forward candles matching the current setup. No ATR projection, drift multiplier, or synthetic forecast path is used. Entry uses the latest loaded price until IBKR bid/ask is added. Choose Timeframe = 5m to calculate true 5m, 15m, 1h, 4h, and Day horizons from 5-minute candles.")
+    st.caption("Clean empirical mode: BUY and SELL levels come from actual historical forward candles matching the current setup.")
     horizon_display = _display_horizon_table(horizon_forecasts)
     main_cols = ["horizon", "bars_ahead", "side", "status", "engine_preferred", "entry", "stop_loss", "take_profit_1", "take_profit_2", "historical_direction_probability_pct", "sample_count"]
     st.dataframe(horizon_display[[c for c in main_cols if c in horizon_display.columns]], use_container_width=True)
@@ -692,6 +642,9 @@ elif page == "Log Snapshot":
         "veto_reasons": "; ".join(veto["reasons"]),
         "bias_validation_side": bias_validation.get("side"),
         "bias_validation_verdict": bias_validation.get("overall_verdict"),
+        "mtf_side": mtf_confirmation.get("side"),
+        "mtf_verdict": mtf_confirmation.get("verdict"),
+        "mtf_reasons": "; ".join(mtf_confirmation.get("reasons", [])),
         "entry_zone_low": plan_value(display_plan, "entry_zone_low"),
         "entry_zone_high": plan_value(display_plan, "entry_zone_high"),
         "stop_loss": plan_value(display_plan, "stop"),
