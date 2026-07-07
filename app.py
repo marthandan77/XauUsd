@@ -11,6 +11,7 @@ import yaml
 from src.ai_explainer import explain
 from src.data_feed import FeedResult, load_csv, load_live_bars, make_sample_bars
 from src.forecast_engine import choose_action, score_forecast
+from src.horizon_forecaster import horizon_forecast_table, multi_horizon_forecast
 from src.indicators import add_indicators
 from src.kc_squeeze_engine import kc_squeeze_summary
 from src.macro_engine import macro_context
@@ -47,6 +48,10 @@ PERSISTED_SETTING_KEYS = {
     "sell_tp1_atr_multiplier",
     "sell_tp2_atr_multiplier",
     "sell_support_buffer_atr",
+    "horizon_min_samples",
+    "horizon_tp1_quantile",
+    "horizon_tp2_quantile",
+    "horizon_adverse_quantile",
     "risk_per_trade_pct",
     "long_plans_enabled",
     "short_plans_enabled",
@@ -215,15 +220,30 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["atr_stop_multiplier"] = st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1)
     settings["atr_tp_multiplier"] = st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1)
     settings["sell_tp1_atr_multiplier"] = st.sidebar.slider(
-        "Sell Take Profit 1 ATR", 0.50, 3.00, float(settings.get("sell_tp1_atr_multiplier", 1.25)), 0.05
+        "Sell Take Profit 1 ATR", 0.50, 3.00, float(settings.get("sell_tp1_atr_multiplier", 1.75)), 0.05
     )
     settings["sell_tp2_atr_multiplier"] = st.sidebar.slider(
-        "Sell Take Profit 2 ATR", 0.75, 5.00, float(settings.get("sell_tp2_atr_multiplier", 2.25)), 0.05
+        "Sell Take Profit 2 ATR", 0.75, 5.00, float(settings.get("sell_tp2_atr_multiplier", 3.25)), 0.05
     )
     settings["sell_support_buffer_atr"] = st.sidebar.slider(
-        "Sell support buffer ATR", 0.00, 1.00, float(settings.get("sell_support_buffer_atr", 0.15)), 0.05
+        "Sell support buffer ATR", 0.00, 1.00, float(settings.get("sell_support_buffer_atr", 0.10)), 0.05
     )
     settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
+
+    st.sidebar.header("Empirical Horizon Forecast")
+    settings["horizon_min_samples"] = st.sidebar.slider(
+        "Minimum matching samples", 10, 200, int(settings.get("horizon_min_samples", 30)), 5
+    )
+    settings["horizon_tp1_quantile"] = st.sidebar.slider(
+        "TP1 historical quantile", 0.25, 0.75, float(settings.get("horizon_tp1_quantile", 0.50)), 0.05
+    )
+    settings["horizon_tp2_quantile"] = st.sidebar.slider(
+        "TP2 historical quantile", 0.50, 0.95, float(settings.get("horizon_tp2_quantile", 0.75)), 0.05
+    )
+    settings["horizon_adverse_quantile"] = st.sidebar.slider(
+        "Stop Loss adverse quantile", 0.50, 0.95, float(settings.get("horizon_adverse_quantile", 0.80)), 0.05
+    )
+
     settings["long_plans_enabled"] = True
     settings["short_plans_enabled"] = True
     st.sidebar.caption("BUY and SELL plan processing is always enabled.")
@@ -303,6 +323,22 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
     return fig
 
 
+def _display_horizon_table(forecasts) -> pd.DataFrame:
+    table = horizon_forecast_table(forecasts)
+    if table.empty:
+        return table
+    display = table.copy()
+    price_cols = ["entry", "stop_loss", "take_profit_1", "take_profit_2", "tp1_move", "tp2_move", "adverse_move"]
+    for col in price_cols:
+        if col in display:
+            display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
+    if "historical_direction_probability_pct" in display:
+        display["historical_direction_probability_pct"] = display["historical_direction_probability_pct"].apply(
+            lambda value: None if pd.isna(value) else round(float(value), 1)
+        )
+    return display
+
+
 settings = load_settings()
 presets = load_yaml(ROOT / "config/presets.yaml")
 settings = settings_panel(settings, presets)
@@ -343,6 +379,7 @@ summary = explain(regime, scores, veto, market, macro)
 active_plan = veto["final_action"] in ACTIONABLE
 status = plan_status(action, veto["final_action"], plan, candidate_action, candidate_note)
 display_plan = plan if has_plan_levels(plan) else candidate_plan
+horizon_forecasts = multi_horizon_forecast(bars, market, action, veto, candidate_action, settings)
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
@@ -355,7 +392,9 @@ if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zo
 
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio("Page", ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
+page = st.sidebar.radio(
+    "Page", ["Forecast Manager", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"]
+)
 
 source_cols = st.columns(4)
 source_cols[0].metric("Data source", feed.source)
@@ -395,6 +434,38 @@ if page == "Forecast Manager":
         st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
     st.subheader("Price and indicators")
     st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
+
+elif page == "Multi-Horizon Forecast":
+    st.subheader("Multi-Horizon Forecast")
+    st.caption(
+        "Actual-outcome mode: levels come from historical forward candles matching the current setup. "
+        "No ATR projection, drift multiplier, or synthetic forecast path is used. Entry uses the latest loaded price until IBKR bid/ask is added."
+    )
+    horizon_display = _display_horizon_table(horizon_forecasts)
+    main_cols = [
+        "horizon",
+        "bars_ahead",
+        "side",
+        "status",
+        "entry",
+        "stop_loss",
+        "take_profit_1",
+        "take_profit_2",
+        "historical_direction_probability_pct",
+        "sample_count",
+    ]
+    st.dataframe(horizon_display[[c for c in main_cols if c in horizon_display.columns]], use_container_width=True)
+    with st.expander("Audit details - actual historical values used"):
+        detail_cols = [
+            "horizon",
+            "tp1_move",
+            "tp2_move",
+            "adverse_move",
+            "sample_count",
+            "matching_setup",
+            "reason",
+        ]
+        st.dataframe(horizon_display[[c for c in detail_cols if c in horizon_display.columns]], use_container_width=True)
 
 elif page == "KC Squeeze":
     st.subheader("KC Squeeze module")
