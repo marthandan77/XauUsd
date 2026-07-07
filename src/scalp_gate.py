@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 
 from src.forecast_labels import add_forward_outcomes, horizons_for_interval, interval_minutes
-from src.trade_plan import build_trade_plan, room_ratio
 
 
 @dataclass
@@ -175,7 +174,7 @@ def _horizon_edge(
     required = [profit_col, adverse_col, "_range_zone", "_momentum_state"]
     sample = _matching_sample(labeled.iloc[:-bars_ahead].copy(), setup, required)
 
-    min_samples = int(settings.get("scalp_min_samples", 60))
+    min_samples = int(settings.get("scalp_min_samples", 40))
     min_validation = int(settings.get("scalp_min_validation_samples", 15))
     if len(sample) < min_samples:
         return _empty_horizon(
@@ -289,6 +288,19 @@ def _passes_rsi_guard(side: str, latest_row: pd.Series, settings: dict) -> tuple
     return True, "RSI is not in the danger zone."
 
 
+def _scalp_room_ratio(side: str, market, five: ScalpHorizon | None) -> float:
+    if market is None or five is None or five.status != "VALID" or five.sl_move is None or five.sl_move <= 0:
+        return 0.0
+    entry = float(five.entry) if five.entry is not None else float(market.price)
+    if side == "BUY":
+        room = float(market.resistance) - entry
+    elif side == "SELL":
+        room = entry - float(market.support)
+    else:
+        return 0.0
+    return max(room / float(five.sl_move), 0.0)
+
+
 def scalp_gate(bars: pd.DataFrame, market, scores: dict, macro: dict, kc: dict, settings: dict) -> ScalpDecision:
     latest_row = bars.iloc[-1] if not bars.empty else pd.Series(dtype=float)
     entry = float(market.price) if market is not None else None
@@ -314,14 +326,6 @@ def scalp_gate(bars: pd.DataFrame, market, scores: dict, macro: dict, kc: dict, 
         reasons.append("Shock candle detected; no scalp immediately after abnormal movement.")
 
     if side in {"BUY", "SELL"}:
-        plan_action = "BUY PLAN" if side == "BUY" else "SELL PLAN"
-        plan_settings = dict(settings)
-        plan_settings["short_plans_enabled"] = True
-        plan = build_trade_plan(plan_action, market, plan_settings)
-        rr = room_ratio(plan_action, plan, market)
-        room_min = float(settings.get("scalp_room_ratio_min", settings.get("min_reward_risk", 1.5)))
-        if rr < room_min:
-            reasons.append(f"Room ratio {rr:.2f} is below scalp minimum {room_min:.2f}.")
         if side == "SELL" and bool(getattr(market, "near_support", False)):
             reasons.append("Price is near support; SELL scalp blocked.")
         if side == "BUY" and bool(getattr(market, "near_resistance", False)):
@@ -357,12 +361,18 @@ def scalp_gate(bars: pd.DataFrame, market, scores: dict, macro: dict, kc: dict, 
     elif (five.tp1_hit_rate_pct or 0.0) <= (five.sl_hit_rate_pct or 0.0):
         reasons.append("5m TP1 hit rate is not better than SL hit rate.")
 
+    rr = _scalp_room_ratio(side, market, five)
+    room_min = float(settings.get("scalp_room_ratio_min", settings.get("min_reward_risk", 1.5)))
+    if side in {"BUY", "SELL"} and five is not None and five.status == "VALID" and rr < room_min:
+        reasons.append(f"Scalp room ratio {rr:.2f} is below scalp minimum {room_min:.2f}.")
+
+    block_edge = float(settings.get("scalp_15m_block_edge", -0.25))
     if fifteen is None or fifteen.status != "VALID":
         reasons.append("15m danger check is unavailable or invalid.")
     elif fifteen.scalp_edge is None:
         reasons.append("15m danger check edge is unavailable.")
-    elif fifteen.scalp_edge < 0:
-        reasons.append(f"15m danger check is negative: {fifteen.scalp_edge:.2f}.")
+    elif fifteen.scalp_edge <= block_edge:
+        reasons.append(f"15m danger check is strongly negative: {fifteen.scalp_edge:.2f}.")
 
     recommendation = "NO SCALP"
     if side in {"BUY", "SELL"} and not reasons:
