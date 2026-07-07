@@ -27,6 +27,15 @@ horizon_min_samples: 30
 horizon_tp1_quantile: 0.50
 horizon_tp2_quantile: 0.75
 horizon_adverse_quantile: 0.80
+scalp_min_samples: 60
+scalp_min_validation_samples: 15
+scalp_validation_fraction: 0.30
+scalp_cost_buffer: 0.40
+scalp_min_edge: 0.00
+scalp_room_ratio_min: 1.50
+scalp_tp2_bonus_weight: 0.25
+scalp_rsi_sell_floor: 35.0
+scalp_rsi_buy_ceiling: 65.0
 min_reward_risk: 1.5
 tp1_r: 1.5
 tp2_r: 2.0
