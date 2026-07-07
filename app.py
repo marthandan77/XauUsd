@@ -113,9 +113,12 @@ def refresh_panel() -> None:
     st.sidebar.caption("Auto-refresh is disabled. The app refreshes only when you press the button or manually reload the browser.")
 
 
-def persistence_panel() -> None:
+def persistence_panel(settings: dict) -> None:
     st.sidebar.header("Settings memory")
-    st.sidebar.caption("Sidebar controls auto-save to data/runtime_settings.yaml and reload after browser refresh.")
+    st.sidebar.caption("Temporary changes affect the current screen only. They persist after browser refresh only when Save is clicked.")
+    if st.sidebar.button("Save sidebar settings", type="primary"):
+        save_runtime_settings(settings)
+        st.sidebar.success("Settings saved.")
     if st.sidebar.button("Reset saved sidebar settings"):
         reset_runtime_settings()
         st.rerun()
@@ -168,7 +171,6 @@ def plan_value(plan: dict, key: str):
 
 
 def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
-    """Build non-executable candidate levels when the forecast is useful but official action is blocked/waiting."""
     threshold = int(settings.get("forecast_threshold", 65))
     bias = str(scores.get("bias", "mixed"))
     bull_score = int(scores.get("bull_score", 0))
@@ -248,32 +250,16 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
 
     st.sidebar.header("Empirical Horizon Forecast")
-    settings["horizon_min_samples"] = st.sidebar.slider(
-        "Minimum matching samples", 10, 200, int(settings.get("horizon_min_samples", 30)), 5
-    )
-    settings["horizon_tp1_quantile"] = st.sidebar.slider(
-        "TP1 historical quantile", 0.25, 0.75, float(settings.get("horizon_tp1_quantile", 0.50)), 0.05
-    )
-    settings["horizon_tp2_quantile"] = st.sidebar.slider(
-        "TP2 historical quantile", 0.50, 0.95, float(settings.get("horizon_tp2_quantile", 0.75)), 0.05
-    )
-    settings["horizon_adverse_quantile"] = st.sidebar.slider(
-        "Stop Loss adverse quantile", 0.50, 0.95, float(settings.get("horizon_adverse_quantile", 0.80)), 0.05
-    )
+    settings["horizon_min_samples"] = st.sidebar.slider("Minimum matching samples", 10, 200, int(settings.get("horizon_min_samples", 30)), 5)
+    settings["horizon_tp1_quantile"] = st.sidebar.slider("TP1 historical quantile", 0.25, 0.75, float(settings.get("horizon_tp1_quantile", 0.50)), 0.05)
+    settings["horizon_tp2_quantile"] = st.sidebar.slider("TP2 historical quantile", 0.50, 0.95, float(settings.get("horizon_tp2_quantile", 0.75)), 0.05)
+    settings["horizon_adverse_quantile"] = st.sidebar.slider("Stop Loss adverse quantile", 0.50, 0.95, float(settings.get("horizon_adverse_quantile", 0.80)), 0.05)
 
     st.sidebar.header("Scalp Gate")
-    settings["scalp_min_samples"] = st.sidebar.slider(
-        "Scalp minimum samples", 30, 200, int(settings.get("scalp_min_samples", 60)), 5
-    )
-    settings["scalp_cost_buffer"] = st.sidebar.slider(
-        "Scalp cost/slippage buffer", 0.00, 3.00, float(settings.get("scalp_cost_buffer", 0.40)), 0.05
-    )
-    settings["scalp_rsi_sell_floor"] = st.sidebar.slider(
-        "RSI sell floor", 20.0, 50.0, float(settings.get("scalp_rsi_sell_floor", 35.0)), 1.0
-    )
-    settings["scalp_rsi_buy_ceiling"] = st.sidebar.slider(
-        "RSI buy ceiling", 50.0, 80.0, float(settings.get("scalp_rsi_buy_ceiling", 65.0)), 1.0
-    )
+    settings["scalp_min_samples"] = st.sidebar.slider("Scalp minimum samples", 30, 200, int(settings.get("scalp_min_samples", 60)), 5)
+    settings["scalp_cost_buffer"] = st.sidebar.slider("Scalp cost/slippage buffer", 0.00, 3.00, float(settings.get("scalp_cost_buffer", 0.40)), 0.05)
+    settings["scalp_rsi_sell_floor"] = st.sidebar.slider("RSI sell floor", 20.0, 50.0, float(settings.get("scalp_rsi_sell_floor", 35.0)), 1.0)
+    settings["scalp_rsi_buy_ceiling"] = st.sidebar.slider("RSI buy ceiling", 50.0, 80.0, float(settings.get("scalp_rsi_buy_ceiling", 65.0)), 1.0)
 
     settings["long_plans_enabled"] = True
     settings["short_plans_enabled"] = True
@@ -317,16 +303,7 @@ def load_bars(settings: dict) -> FeedResult:
 def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go.Figure:
     chart_df = df.tail(220)
     fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=chart_df.index,
-            open=chart_df["open"],
-            high=chart_df["high"],
-            low=chart_df["low"],
-            close=chart_df["close"],
-            name="XAU/USD",
-        )
-    )
+    fig.add_trace(go.Candlestick(x=chart_df.index, open=chart_df["open"], high=chart_df["high"], low=chart_df["low"], close=chart_df["close"], name="XAU/USD"))
     for column, label in [("ema_fast", "EMA Fast"), ("ema_slow", "EMA Slow"), ("trend_sma", "Trend SMA")]:
         if column in chart_df:
             fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df[column], mode="lines", name=label))
@@ -340,16 +317,7 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df[column], mode="lines", name=label))
     if action in ACTIONABLE and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None:
         marker_price = (float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0
-        fig.add_trace(
-            go.Scatter(
-                x=[chart_df.index[-1]],
-                y=[marker_price],
-                mode="markers+text",
-                text=[action],
-                textposition="top center",
-                name="Advisory signal",
-            )
-        )
+        fig.add_trace(go.Scatter(x=[chart_df.index[-1]], y=[marker_price], mode="markers+text", text=[action], textposition="top center", name="Advisory signal"))
     fig.update_layout(height=640, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
     return fig
 
@@ -364,9 +332,7 @@ def _display_horizon_table(forecasts) -> pd.DataFrame:
         if col in display:
             display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
     if "historical_direction_probability_pct" in display:
-        display["historical_direction_probability_pct"] = display["historical_direction_probability_pct"].apply(
-            lambda value: None if pd.isna(value) else round(float(value), 1)
-        )
+        display["historical_direction_probability_pct"] = display["historical_direction_probability_pct"].apply(lambda value: None if pd.isna(value) else round(float(value), 1))
     return display
 
 
@@ -399,19 +365,7 @@ def _display_scalp_table(scalp_decision) -> pd.DataFrame:
     if table.empty:
         return table
     display = table.copy()
-    numeric_cols = [
-        "entry",
-        "stop_loss",
-        "take_profit_1",
-        "take_profit_2",
-        "tp1_move",
-        "tp2_move",
-        "sl_move",
-        "scalp_edge",
-        "tp1_hit_rate_pct",
-        "tp2_hit_rate_pct",
-        "sl_hit_rate_pct",
-    ]
+    numeric_cols = ["entry", "stop_loss", "take_profit_1", "take_profit_2", "tp1_move", "tp2_move", "sl_move", "scalp_edge", "tp1_hit_rate_pct", "tp2_hit_rate_pct", "sl_hit_rate_pct"]
     for col in numeric_cols:
         if col in display:
             display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
@@ -432,16 +386,14 @@ def _horizon_value(scalp_display: pd.DataFrame, horizon: str, column: str):
 
 
 def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFrame:
-    five_edge = _horizon_value(scalp_display, "5m", "scalp_edge")
-    fifteen_edge = _horizon_value(scalp_display, "15m", "scalp_edge")
     rows = [
         ("Recommendation", scalp_decision.recommendation, "Final answer."),
         ("Side", scalp_decision.side, "Allowed direction."),
         ("Room ratio", fmt_metric(scalp_decision.room_ratio, 2), "Space vs risk."),
         ("RSI", fmt_metric(scalp_decision.rsi, 1), "Overbought/oversold guard."),
         ("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2), "Negative=down, positive=up."),
-        ("5m scalp edge", fmt_metric(five_edge, 2), "Trigger. >0 good."),
-        ("15m scalp edge", fmt_metric(fifteen_edge, 2), "Danger check. <0 bad."),
+        ("5m scalp edge", fmt_metric(_horizon_value(scalp_display, "5m", "scalp_edge"), 2), "Trigger. >0 good."),
+        ("15m scalp edge", fmt_metric(_horizon_value(scalp_display, "15m", "scalp_edge"), 2), "Danger check. <0 bad."),
         ("TP1 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 1), "Fast target odds."),
         ("TP2 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1), "Stretch target odds."),
         ("SL hit %", fmt_metric(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 1), "Stop-loss odds."),
@@ -459,14 +411,11 @@ settings = load_settings()
 presets = load_yaml(ROOT / "config/presets.yaml")
 settings = settings_panel(settings, presets)
 refresh_panel()
-persistence_panel()
 macro_options = ["mixed", "supportive", "restrictive"]
-macro_bias = st.sidebar.selectbox(
-    "Macro bias", macro_options, index=_select_index(macro_options, str(settings.get("macro_bias", "mixed")))
-)
+macro_bias = st.sidebar.selectbox("Macro bias", macro_options, index=_select_index(macro_options, str(settings.get("macro_bias", "mixed"))))
 settings["macro_bias"] = macro_bias
 feed = load_bars(settings)
-save_runtime_settings(settings)
+persistence_panel(settings)
 
 bars_raw = add_indicators(feed.bars, settings)
 bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
@@ -478,7 +427,6 @@ kc = kc_squeeze_summary(bars, settings)
 latest_row = bars.iloc[-1].to_dict()
 latest_row["kc_state"] = kc["state"]
 latest_row["kc_reason"] = kc["reason"]
-
 market = build_market_map(bars, settings)
 regime = classify_regime(bars, market, settings)
 macro = macro_context(macro_bias, bool(settings.get("news_block_manual", False)))
@@ -500,18 +448,11 @@ scalp_decision = scalp_gate(bars, market, scores, macro, kc, settings)
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
-    advisory_qty = advisory_position_size(
-        account_equity=10000,
-        risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0,
-        entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0,
-        stop=float(plan["stop"]),
-    )
+    advisory_qty = advisory_position_size(account_equity=10000, risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0, entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0, stop=float(plan["stop"]))
 
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio(
-    "Page", ["Forecast Manager", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"]
-)
+page = st.sidebar.radio("Page", ["Forecast Manager", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
 
 source_cols = st.columns(4)
 source_cols[0].metric("Data source", feed.source)
@@ -552,22 +493,13 @@ if page == "Forecast Manager":
 
 elif page == "Scalp Gate":
     st.subheader("Scalp Gate")
-    st.caption(
-        "Sniper mode: bias gives direction, 5m gives trigger, 15m checks danger. "
-        "KC and RSI are kept as live guards. TP2 is kept in the edge calculation with a small capped bonus. "
-        "Use Timeframe = 5m for true 5m and 15m scalp recommendations."
-    )
+    st.caption("Sniper mode: bias gives direction, 5m gives trigger, 15m checks danger. KC and RSI are kept as live guards. TP2 is kept in the edge calculation with a small capped bonus. Use Timeframe = 5m for true 5m and 15m scalp recommendations.")
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Recommendation", scalp_decision.recommendation)
-    m1.caption("Final answer.")
-    m2.metric("Side", scalp_decision.side)
-    m2.caption("Allowed direction.")
-    m3.metric("Room ratio", fmt_metric(scalp_decision.room_ratio, 2))
-    m3.caption("Space vs risk.")
-    m4.metric("RSI", fmt_metric(scalp_decision.rsi, 1))
-    m4.caption("Overbought/oversold guard.")
-    m5.metric("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2))
-    m5.caption("Negative=down, positive=up.")
+    m1.metric("Recommendation", scalp_decision.recommendation); m1.caption("Final answer.")
+    m2.metric("Side", scalp_decision.side); m2.caption("Allowed direction.")
+    m3.metric("Room ratio", fmt_metric(scalp_decision.room_ratio, 2)); m3.caption("Space vs risk.")
+    m4.metric("RSI", fmt_metric(scalp_decision.rsi, 1)); m4.caption("Overbought/oversold guard.")
+    m5.metric("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2)); m5.caption("Negative=down, positive=up.")
     if scalp_decision.reasons:
         st.error("NO SCALP reasons: " + "; ".join(scalp_decision.reasons))
     else:
@@ -575,22 +507,7 @@ elif page == "Scalp Gate":
     scalp_display = _display_scalp_table(scalp_decision)
     st.subheader("Very short value guide")
     st.dataframe(_scalp_value_guide(scalp_decision, scalp_display), use_container_width=True, hide_index=True)
-    scalp_cols = [
-        "horizon",
-        "side",
-        "status",
-        "explanation",
-        "entry",
-        "stop_loss",
-        "take_profit_1",
-        "take_profit_2",
-        "scalp_edge",
-        "tp1_hit_rate_pct",
-        "tp2_hit_rate_pct",
-        "sl_hit_rate_pct",
-        "train_samples",
-        "validation_samples",
-    ]
+    scalp_cols = ["horizon", "side", "status", "explanation", "entry", "stop_loss", "take_profit_1", "take_profit_2", "scalp_edge", "tp1_hit_rate_pct", "tp2_hit_rate_pct", "sl_hit_rate_pct", "train_samples", "validation_samples"]
     st.dataframe(scalp_display[[c for c in scalp_cols if c in scalp_display.columns]], use_container_width=True)
     with st.expander("Scalp Gate audit"):
         audit_cols = ["horizon", "side", "tp1_move", "tp2_move", "sl_move", "reason"]
@@ -599,37 +516,12 @@ elif page == "Scalp Gate":
 
 elif page == "Multi-Horizon Forecast":
     st.subheader("Multi-Horizon Forecast")
-    st.caption(
-        "Clean empirical mode: BUY and SELL levels come from actual historical forward candles matching the current setup. "
-        "No ATR projection, drift multiplier, or synthetic forecast path is used. Entry uses the latest loaded price until IBKR bid/ask is added. "
-        "Choose Timeframe = 5m to calculate true 5m, 15m, 1h, 4h, and Day horizons from 5-minute candles."
-    )
+    st.caption("Clean empirical mode: BUY and SELL levels come from actual historical forward candles matching the current setup. No ATR projection, drift multiplier, or synthetic forecast path is used. Entry uses the latest loaded price until IBKR bid/ask is added. Choose Timeframe = 5m to calculate true 5m, 15m, 1h, 4h, and Day horizons from 5-minute candles.")
     horizon_display = _display_horizon_table(horizon_forecasts)
-    main_cols = [
-        "horizon",
-        "bars_ahead",
-        "side",
-        "status",
-        "engine_preferred",
-        "entry",
-        "stop_loss",
-        "take_profit_1",
-        "take_profit_2",
-        "historical_direction_probability_pct",
-        "sample_count",
-    ]
+    main_cols = ["horizon", "bars_ahead", "side", "status", "engine_preferred", "entry", "stop_loss", "take_profit_1", "take_profit_2", "historical_direction_probability_pct", "sample_count"]
     st.dataframe(horizon_display[[c for c in main_cols if c in horizon_display.columns]], use_container_width=True)
     with st.expander("Audit details - actual historical values used"):
-        detail_cols = [
-            "horizon",
-            "side",
-            "tp1_move",
-            "tp2_move",
-            "adverse_move",
-            "sample_count",
-            "matching_setup",
-            "reason",
-        ]
+        detail_cols = ["horizon", "side", "tp1_move", "tp2_move", "adverse_move", "sample_count", "matching_setup", "reason"]
         st.dataframe(horizon_display[[c for c in detail_cols if c in horizon_display.columns]], use_container_width=True)
 
 elif page == "KC Squeeze":
