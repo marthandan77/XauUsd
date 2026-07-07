@@ -11,6 +11,7 @@ import yaml
 from src.ai_explainer import explain
 from src.bias_validation import bias_validation_summary, bias_validation_table
 from src.data_feed import FeedResult, load_csv, load_live_bars, make_sample_bars
+from src.exhaustion_engine import exhaustion_context
 from src.forecast_engine import choose_action, score_forecast
 from src.horizon_forecaster import horizon_forecast_table, multi_horizon_forecast
 from src.indicators import add_indicators
@@ -21,6 +22,7 @@ from src.multi_timeframe import multi_timeframe_confirmation, multi_timeframe_ta
 from src.range_model import price_bands
 from src.regime_engine import classify_regime
 from src.scalp_gate import scalp_gate, scalp_horizon_table
+from src.scan_logger import append_scan_log, read_scan_log
 from src.trade_plan import advisory_position_size, build_trade_plan
 from src.veto_engine import apply_veto
 
@@ -76,9 +78,7 @@ def _select_index(options: list[str], value: str) -> int:
 
 
 def _sample_freq(settings: dict) -> str:
-    return {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
-        str(settings.get("price_interval", "15m")), "15min"
-    )
+    return {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(str(settings.get("price_interval", "15m")), "15min")
 
 
 def fmt_price(value) -> str:
@@ -132,19 +132,16 @@ def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[st
     bias = str(scores.get("bias", "mixed"))
     bull_score = int(scores.get("bull_score", 0))
     bear_score = int(scores.get("bear_score", 0))
-
     if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
         plan = build_trade_plan("BUY PLAN", market, settings)
         plan["note"] = "Bullish forecast candidate. Use only if final action is BUY PLAN and veto filters are clean."
         return "BUY CANDIDATE", plan, "Bullish candidate levels shown because bull forecast is above forecast threshold."
-
     if bias == "bearish" and bear_score >= threshold:
         preview_settings = dict(settings)
         preview_settings["short_plans_enabled"] = True
         plan = build_trade_plan("SELL PLAN", market, preview_settings)
         plan["note"] = "Bearish forecast candidate. Use only if final action is SELL PLAN and veto filters are clean."
         return "SELL CANDIDATE", plan, "Bearish candidate levels shown because bear forecast is above forecast threshold."
-
     return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "No forecast candidate above threshold."}, ""
 
 
@@ -182,7 +179,6 @@ def settings_panel(settings: dict, presets: dict) -> dict:
         selected = st.sidebar.selectbox("Preset", list(presets.keys()), index=0)
         if st.sidebar.button("Load preset"):
             settings.update(presets[selected])
-
     interval_options = ["5m", "15m", "30m", "1h", "4h", "1d"]
     period_options = ["7d", "30d", "60d", "6mo", "1y", "2y"]
     settings["price_interval"] = st.sidebar.selectbox("Timeframe", interval_options, index=_select_index(interval_options, str(settings.get("price_interval", "15m"))))
@@ -194,7 +190,6 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["min_reward_risk"] = st.sidebar.slider("Minimum room ratio", 1.0, 3.0, float(settings.get("min_reward_risk", 1.5)), 0.1)
     settings["middle_range_lower_pct"] = st.sidebar.slider("Middle zone lower %", 10, 49, int(settings.get("middle_range_lower_pct", 35)))
     settings["middle_range_upper_pct"] = st.sidebar.slider("Middle zone upper %", 51, 90, int(settings.get("middle_range_upper_pct", 65)))
-
     st.sidebar.header("KC Squeeze")
     settings["kc_squeeze_enabled"] = st.sidebar.toggle("Enable KC Squeeze module", bool(settings.get("kc_squeeze_enabled", True)))
     settings["bb_length"] = st.sidebar.slider("BB length", 10, 60, int(settings.get("bb_length", 20)))
@@ -209,13 +204,11 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["sell_tp2_atr_multiplier"] = st.sidebar.slider("Sell Take Profit 2 ATR", 0.75, 5.00, float(settings.get("sell_tp2_atr_multiplier", 3.25)), 0.05)
     settings["sell_support_buffer_atr"] = st.sidebar.slider("Sell support buffer ATR", 0.00, 1.00, float(settings.get("sell_support_buffer_atr", 0.10)), 0.05)
     settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
-
     st.sidebar.header("Empirical Horizon Forecast")
     settings["horizon_min_samples"] = st.sidebar.slider("Minimum matching samples", 10, 200, int(settings.get("horizon_min_samples", 30)), 5)
     settings["horizon_tp1_quantile"] = st.sidebar.slider("TP1 historical quantile", 0.25, 0.75, float(settings.get("horizon_tp1_quantile", 0.50)), 0.05)
     settings["horizon_tp2_quantile"] = st.sidebar.slider("TP2 historical quantile", 0.50, 0.95, float(settings.get("horizon_tp2_quantile", 0.75)), 0.05)
     settings["horizon_adverse_quantile"] = st.sidebar.slider("Stop Loss adverse quantile", 0.50, 0.95, float(settings.get("horizon_adverse_quantile", 0.80)), 0.05)
-
     st.sidebar.header("Scalp Gate")
     settings["scalp_min_samples"] = st.sidebar.slider("Scalp minimum samples", 30, 200, int(settings.get("scalp_min_samples", 40)), 5)
     settings["scalp_cost_buffer"] = st.sidebar.slider("Scalp cost/slippage buffer", 0.00, 3.00, float(settings.get("scalp_cost_buffer", 0.40)), 0.05)
@@ -241,12 +234,7 @@ def load_bars(settings: dict) -> FeedResult:
             return load_csv(uploaded)
         return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "CSV not uploaded; sample data used")
     if data_mode == "Twelve Data API":
-        key_input = st.sidebar.text_input(
-            "Twelve Data API key - optional local session override",
-            value="",
-            type="password",
-            help="Use this only if Streamlit cannot see your Windows environment variable. The key is not saved to GitHub or runtime settings.",
-        )
+        key_input = st.sidebar.text_input("Twelve Data API key - optional local session override", value="", type="password", help="Use this only if Streamlit cannot see your Windows environment variable. The key is not saved to GitHub or runtime settings.")
         if key_input.strip():
             settings["twelve_data_api_key_runtime"] = key_input.strip()
         feed = load_live_bars(settings)
@@ -291,30 +279,6 @@ def _display_horizon_table(forecasts) -> pd.DataFrame:
     return display
 
 
-def _scalp_status_note(status: str) -> str:
-    return {
-        "VALID": "Usable sample.",
-        "INSUFFICIENT_DATA": "Too few matches.",
-        "INSUFFICIENT_VALIDATION": "Too few recent tests.",
-        "NO_EDGE": "No positive edge.",
-        "UNAVAILABLE": "Use 5m timeframe.",
-    }.get(str(status), "Check row.")
-
-
-def _scalp_row_explanation(row: pd.Series) -> str:
-    status = str(row.get("status", ""))
-    if status != "VALID":
-        return _scalp_status_note(status)
-    edge = _safe_float(row.get("scalp_edge"), 0.0)
-    tp1 = _safe_float(row.get("tp1_hit_rate_pct"), 0.0)
-    sl = _safe_float(row.get("sl_hit_rate_pct"), 0.0)
-    if edge > 0 and tp1 > sl:
-        return "Good edge."
-    if edge < 0:
-        return "Negative edge."
-    return "Weak edge."
-
-
 def _display_scalp_table(scalp_decision) -> pd.DataFrame:
     table = scalp_horizon_table(scalp_decision)
     if table.empty:
@@ -323,7 +287,15 @@ def _display_scalp_table(scalp_decision) -> pd.DataFrame:
     for col in ["entry", "stop_loss", "take_profit_1", "take_profit_2", "tp1_move", "tp2_move", "sl_move", "scalp_edge", "tp1_hit_rate_pct", "tp2_hit_rate_pct", "sl_hit_rate_pct"]:
         if col in display:
             display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
-    display["explanation"] = display.apply(_scalp_row_explanation, axis=1)
+    def explain_row(row: pd.Series) -> str:
+        status = str(row.get("status", ""))
+        if status != "VALID":
+            return {"INSUFFICIENT_DATA": "Too few matches.", "INSUFFICIENT_VALIDATION": "Too few recent tests.", "NO_EDGE": "No positive edge.", "UNAVAILABLE": "Use 5m timeframe."}.get(status, "Check row.")
+        edge = _safe_float(row.get("scalp_edge"), 0.0)
+        tp1 = _safe_float(row.get("tp1_hit_rate_pct"), 0.0)
+        sl = _safe_float(row.get("sl_hit_rate_pct"), 0.0)
+        return "Good edge." if edge > 0 and tp1 > sl else "Negative edge." if edge < 0 else "Weak edge."
+    display["explanation"] = display.apply(explain_row, axis=1)
     return display
 
 
@@ -335,6 +307,82 @@ def _horizon_value(scalp_display: pd.DataFrame, horizon: str, column: str):
         return None
     value = row.iloc[0].get(column)
     return None if pd.isna(value) else value
+
+
+def _scalp_signal_confidence(scalp_decision, scalp_display: pd.DataFrame) -> int:
+    if scalp_decision.recommendation not in SCALP_ACTIONS:
+        return 0
+    five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
+    fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
+    tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
+    sl_rate = _safe_float(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 0.0)
+    train_samples = _safe_float(_horizon_value(scalp_display, "5m", "train_samples"), 0.0)
+    validation_samples = _safe_float(_horizon_value(scalp_display, "5m", "validation_samples"), 0.0)
+    room_ratio = _safe_float(scalp_decision.room_ratio, 0.0)
+    confidence = 35.0 + min(max(five_edge, 0.0) * 12.0, 20.0)
+    confidence += 15.0 if fifteen_edge >= 0 else 7.0
+    confidence += min(max(tp1_rate - sl_rate, 0.0) * 0.35, 20.0)
+    confidence += min(max(room_ratio - 1.5, 0.0) * 8.0, 10.0)
+    confidence += min(train_samples / 40.0, 1.0) * 5.0 + min(validation_samples / 15.0, 1.0) * 5.0 + 5.0
+    return int(max(0, min(round(confidence), 95)))
+
+
+def _scalp_quality_label(confidence: int) -> str:
+    if confidence >= 80:
+        return "Strong"
+    if confidence >= 70:
+        return "Good"
+    if confidence >= 60:
+        return "Acceptable"
+    return "Weak"
+
+
+def _show_scalp_scan_result(scalp_decision, scalp_display: pd.DataFrame) -> str:
+    confidence = _scalp_signal_confidence(scalp_decision, scalp_display)
+    five_status = _horizon_value(scalp_display, "5m", "status")
+    viable = scalp_decision.recommendation in SCALP_ACTIONS and str(five_status) == "VALID"
+    five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
+    fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
+    tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
+    sl_rate = _safe_float(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 0.0)
+    reasons = list(getattr(scalp_decision, "reasons", []) or [])
+    if not viable:
+        near_miss = str(five_status) == "VALID" and (five_edge > 0 or tp1_rate > sl_rate or _safe_float(scalp_decision.room_ratio, 0.0) > 0)
+        if near_miss:
+            st.warning("NEAR MISS / WAIT")
+            st.write("Main blocker: " + (reasons[0] if reasons else "Scalp Gate has not cleared all filters."))
+            cols = st.columns(6)
+            cols[0].metric("Closest side", scalp_decision.side)
+            cols[1].metric("5m Edge", fmt_metric(five_edge, 2))
+            cols[2].metric("15m Edge", fmt_metric(fifteen_edge, 2))
+            cols[3].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
+            cols[4].metric("RSI", fmt_metric(scalp_decision.rsi, 1))
+            cols[5].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
+            st.caption("No entry, SL or TP shown because at least one filter is still blocking the scalp.")
+            return "NEAR MISS / WAIT"
+        st.error("NO GOOD SIGNAL")
+        if not reasons:
+            reasons.append("Scalp Gate did not produce a clean signal.")
+        st.write("Reason: " + "; ".join(reasons))
+        return "NO GOOD SIGNAL"
+    quality = _scalp_quality_label(confidence)
+    st.success(f"SCALP SIGNAL: {scalp_decision.recommendation}")
+    top = st.columns(5)
+    top[0].metric("Confidence", f"{confidence}%", quality)
+    top[1].metric("Entry", fmt_price(_horizon_value(scalp_display, "5m", "entry")))
+    top[2].metric("Stop Loss", fmt_price(_horizon_value(scalp_display, "5m", "stop_loss")))
+    top[3].metric("Take Profit 1", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_1")))
+    top[4].metric("Take Profit 2", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_2")))
+    quality_cols = st.columns(7)
+    quality_cols[0].metric("5m Edge", fmt_metric(five_edge, 2))
+    quality_cols[1].metric("15m Edge", fmt_metric(fifteen_edge, 2))
+    quality_cols[2].metric("TP1 Hit %", fmt_metric(tp1_rate, 1))
+    quality_cols[3].metric("TP2 Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1))
+    quality_cols[4].metric("SL Hit %", fmt_metric(sl_rate, 1))
+    quality_cols[5].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
+    quality_cols[6].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
+    st.caption("Reason: 5m trigger valid. 15m danger is clear or only slight caution. Room, RSI and KC guards passed.")
+    return "SCALP SIGNAL"
 
 
 def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFrame:
@@ -357,87 +405,35 @@ def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFr
     return pd.DataFrame(rows, columns=["Value", "Now", "Very short meaning"])
 
 
-def _scalp_signal_confidence(scalp_decision, scalp_display: pd.DataFrame) -> int:
-    if scalp_decision.recommendation not in SCALP_ACTIONS:
-        return 0
-    five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
-    fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
-    tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
-    sl_rate = _safe_float(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 0.0)
-    train_samples = _safe_float(_horizon_value(scalp_display, "5m", "train_samples"), 0.0)
-    validation_samples = _safe_float(_horizon_value(scalp_display, "5m", "validation_samples"), 0.0)
-    room_ratio = _safe_float(scalp_decision.room_ratio, 0.0)
-    confidence = 35.0
-    confidence += min(max(five_edge, 0.0) * 12.0, 20.0)
-    confidence += 15.0 if fifteen_edge >= 0 else 7.0
-    confidence += min(max(tp1_rate - sl_rate, 0.0) * 0.35, 20.0)
-    confidence += min(max(room_ratio - 1.5, 0.0) * 8.0, 10.0)
-    confidence += min(train_samples / 40.0, 1.0) * 5.0
-    confidence += min(validation_samples / 15.0, 1.0) * 5.0
-    confidence += 5.0
-    return int(max(0, min(round(confidence), 95)))
+def _score_breakdown_table(scores: dict) -> pd.DataFrame:
+    rows = []
+    for bucket, values in dict(scores.get("components", {})).items():
+        rows.append({"component": bucket, "bull": values.get("bull", 0), "bear": values.get("bear", 0), "net": values.get("bull", 0) - values.get("bear", 0)})
+    return pd.DataFrame(rows)
 
 
-def _scalp_quality_label(confidence: int) -> str:
-    if confidence >= 80:
-        return "Strong"
-    if confidence >= 70:
-        return "Good"
-    if confidence >= 60:
-        return "Acceptable"
-    return "Weak"
-
-
-def _show_scalp_scan_result(scalp_decision, scalp_display: pd.DataFrame) -> None:
-    confidence = _scalp_signal_confidence(scalp_decision, scalp_display)
-    five_status = _horizon_value(scalp_display, "5m", "status")
-    viable = scalp_decision.recommendation in SCALP_ACTIONS and str(five_status) == "VALID"
-    five_edge = _safe_float(_horizon_value(scalp_display, "5m", "scalp_edge"), 0.0)
-    fifteen_edge = _safe_float(_horizon_value(scalp_display, "15m", "scalp_edge"), 0.0)
-    tp1_rate = _safe_float(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 0.0)
-    sl_rate = _safe_float(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 0.0)
-    reasons = list(getattr(scalp_decision, "reasons", []) or [])
-
-    if not viable:
-        near_miss = str(five_status) == "VALID" and (five_edge > 0 or tp1_rate > sl_rate or _safe_float(scalp_decision.room_ratio, 0.0) > 0)
-        if near_miss:
-            st.warning("NEAR MISS / WAIT")
-            st.write("Main blocker: " + (reasons[0] if reasons else "Scalp Gate has not cleared all filters."))
-            cols = st.columns(6)
-            cols[0].metric("Closest side", scalp_decision.side)
-            cols[1].metric("5m Edge", fmt_metric(five_edge, 2))
-            cols[2].metric("15m Edge", fmt_metric(fifteen_edge, 2))
-            cols[3].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
-            cols[4].metric("RSI", fmt_metric(scalp_decision.rsi, 1))
-            cols[5].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
-            st.caption("No entry, SL or TP shown because at least one filter is still blocking the scalp.")
-            return
-        st.error("NO GOOD SIGNAL")
-        if not reasons:
-            reasons.append("Scalp Gate did not produce a clean signal.")
-        st.write("Reason: " + "; ".join(reasons))
-        return
-
-    quality = _scalp_quality_label(confidence)
-    st.success(f"SCALP SIGNAL: {scalp_decision.recommendation}")
-    top = st.columns(5)
-    top[0].metric("Confidence", f"{confidence}%", quality)
-    top[1].metric("Entry", fmt_price(_horizon_value(scalp_display, "5m", "entry")))
-    top[2].metric("Stop Loss", fmt_price(_horizon_value(scalp_display, "5m", "stop_loss")))
-    top[3].metric("Take Profit 1", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_1")))
-    top[4].metric("Take Profit 2", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_2")))
-    quality_cols = st.columns(7)
-    quality_cols[0].metric("5m Edge", fmt_metric(five_edge, 2))
-    quality_cols[1].metric("15m Edge", fmt_metric(fifteen_edge, 2))
-    quality_cols[2].metric("TP1 Hit %", fmt_metric(tp1_rate, 1))
-    quality_cols[3].metric("TP2 Hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1))
-    quality_cols[4].metric("SL Hit %", fmt_metric(sl_rate, 1))
-    quality_cols[5].metric("Room Ratio", fmt_metric(scalp_decision.room_ratio, 2))
-    quality_cols[6].metric("KC Momentum", fmt_metric(scalp_decision.kc_momentum, 2))
-    if fifteen_edge < 0:
-        st.caption("Reason: 5m trigger valid. 15m is slightly negative but above the hard block threshold. Treat as caution.")
-    else:
-        st.caption("Reason: 5m trigger valid. 15m danger check clear. Room, RSI and KC guards passed.")
+def _scan_log_row(outcome: str, scalp_decision, scalp_display: pd.DataFrame, market, scores: dict, veto: dict, mtf: dict, exhaustion: dict) -> dict:
+    return {
+        "time_utc": pd.Timestamp.utcnow().isoformat(),
+        "price": market.price,
+        "outcome": outcome,
+        "scalp_recommendation": scalp_decision.recommendation,
+        "side": scalp_decision.side,
+        "entry": _horizon_value(scalp_display, "5m", "entry"),
+        "stop_loss": _horizon_value(scalp_display, "5m", "stop_loss"),
+        "take_profit_1": _horizon_value(scalp_display, "5m", "take_profit_1"),
+        "take_profit_2": _horizon_value(scalp_display, "5m", "take_profit_2"),
+        "5m_edge": _horizon_value(scalp_display, "5m", "scalp_edge"),
+        "15m_edge": _horizon_value(scalp_display, "15m", "scalp_edge"),
+        "room_ratio": scalp_decision.room_ratio,
+        "bias": scores.get("bias"),
+        "bull_score": scores.get("bull_score"),
+        "bear_score": scores.get("bear_score"),
+        "final_action": veto.get("final_action"),
+        "mtf_verdict": mtf.get("verdict"),
+        "exhaustion_state": exhaustion.get("state"),
+        "reasons": "; ".join(list(getattr(scalp_decision, "reasons", []) or [])),
+    }
 
 
 settings = load_settings()
@@ -463,6 +459,8 @@ latest_row["kc_reason"] = kc["reason"]
 market = build_market_map(bars, settings)
 regime = classify_regime(bars, market, settings)
 macro = macro_context(macro_bias, bool(settings.get("news_block_manual", False)))
+exhaustion = exhaustion_context(bars, market, settings)
+exhaustion_dict = exhaustion.to_dict()
 scores = score_forecast(latest_row, market, regime, macro, settings)
 if kc["state"] != "insufficient_data":
     scores["kc_state"] = kc["state"]
@@ -471,7 +469,7 @@ action = choose_action(scores, settings)
 plan = build_trade_plan(action, market, settings)
 candidate_action, candidate_plan, candidate_note = candidate_plan_from_scores(scores, market, settings)
 bands = price_bands(market, regime)
-veto = apply_veto(action, plan, market, regime, macro, settings)
+veto = apply_veto(action, plan, market, regime, macro, settings, exhaustion_dict)
 summary = explain(regime, scores, veto, market, macro)
 active_plan = veto["final_action"] in ACTIONABLE
 status = plan_status(action, veto["final_action"], plan, candidate_action)
@@ -483,19 +481,11 @@ mtf_confirmation = multi_timeframe_confirmation(bars, settings, macro)
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
-    advisory_qty = advisory_position_size(
-        account_equity=10000,
-        risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0,
-        entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0,
-        stop=float(plan["stop"]),
-    )
+    advisory_qty = advisory_position_size(account_equity=10000, risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0, entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0, stop=float(plan["stop"]))
 
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio(
-    "Page",
-    ["Forecast Manager", "Bull/Bear Validation", "MTF Confirmation", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"],
-)
+page = st.sidebar.radio("Page", ["Sniper Dashboard", "Forecast Manager", "Bull/Bear Validation", "MTF Confirmation", "Structure Levels", "Score Breakdown", "Exhaustion Guard", "Scalp Gate", "Multi-Horizon Forecast", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Scan History", "Log Snapshot"])
 
 source_cols = st.columns(4)
 source_cols[0].metric("Data source", feed.source)
@@ -505,7 +495,34 @@ source_cols[3].metric("Rows after warm-up", f"{len(bars):,}")
 if feed.warning:
     st.warning(feed.warning)
 
-if page == "Forecast Manager":
+if page == "Sniper Dashboard":
+    st.subheader("Sniper Dashboard")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Can trade now?", "YES" if active_plan else "WAIT")
+    a2.metric("Final action", veto["final_action"])
+    a3.metric("MTF", mtf_confirmation.get("verdict", "INCOMPLETE"))
+    a4.metric("Exhaustion", exhaustion_dict.get("state", "clear"))
+    st.caption(f"Bull/Bear validation: {bias_validation.get('overall_verdict', 'NO EDGE')} | Side: {bias_validation.get('side', 'NONE')}")
+    if veto["reasons"]:
+        st.error("Blockers: " + "; ".join(veto["reasons"]))
+    if exhaustion_dict.get("warnings"):
+        st.warning("; ".join(exhaustion_dict.get("warnings", [])))
+    if not active_plan:
+        st.warning("No active trade plan. Wait for a clean actionable signal.")
+        if st.button("Scan scalp now", type="primary"):
+            scalp_display_for_scan = _display_scalp_table(scalp_decision)
+            outcome = _show_scalp_scan_result(scalp_decision, scalp_display_for_scan)
+            append_scan_log(_scan_log_row(outcome, scalp_decision, scalp_display_for_scan, market, scores, veto, mtf_confirmation, exhaustion_dict))
+            st.caption("Scan logged to data/scan_log.csv")
+    else:
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Entry low", fmt_price(plan_value(display_plan, "entry_zone_low")))
+        p2.metric("Entry high", fmt_price(plan_value(display_plan, "entry_zone_high")))
+        p3.metric("SL", fmt_price(plan_value(display_plan, "stop")))
+        p4.metric("TP1", fmt_price(plan_value(display_plan, "tp1")))
+        st.metric("TP2", fmt_price(plan_value(display_plan, "tp2")))
+
+elif page == "Forecast Manager":
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Final action", veto["final_action"])
     c2.metric("Raw action", action)
@@ -539,11 +556,12 @@ if page == "Forecast Manager":
         st.warning("No active trade plan. Wait for a clean actionable signal.")
         if st.button("Scan scalp now", type="primary"):
             scalp_display_for_scan = _display_scalp_table(scalp_decision)
-            _show_scalp_scan_result(scalp_decision, scalp_display_for_scan)
+            outcome = _show_scalp_scan_result(scalp_decision, scalp_display_for_scan)
+            append_scan_log(_scan_log_row(outcome, scalp_decision, scalp_display_for_scan, market, scores, veto, mtf_confirmation, exhaustion_dict))
+            st.caption("Scan logged to data/scan_log.csv")
 
 elif page == "Bull/Bear Validation":
     st.subheader("Bull/Bear Validation")
-    st.caption("Checks whether the current bull/bear setup had real forward follow-through in similar historical setups. This is evidence, not an order signal.")
     b1, b2, b3 = st.columns(3)
     b1.metric("Current bias", bias_validation.get("bias", "mixed"))
     b2.metric("Validation side", bias_validation.get("side", "NONE"))
@@ -558,7 +576,7 @@ elif page == "Bull/Bear Validation":
 
 elif page == "MTF Confirmation":
     st.subheader("Multi-Timeframe Confirmation")
-    st.caption("Phase 4: 5m is trigger, 15m is danger check, 1h is structure. Use Timeframe = 5m for full confirmation.")
+    st.caption("5m trigger, 15m danger check, 1h structure. Use Timeframe = 5m for full confirmation.")
     m1, m2, m3 = st.columns(3)
     m1.metric("MTF verdict", mtf_confirmation.get("verdict", "INCOMPLETE"))
     m2.metric("MTF side", mtf_confirmation.get("side", "NONE"))
@@ -569,9 +587,48 @@ elif page == "MTF Confirmation":
     mtf_cols = ["timeframe", "role", "status", "bias", "action", "regime", "confidence", "kc_state", "kc_momentum", "rsi", "price", "reason"]
     st.dataframe(mtf_display[[c for c in mtf_cols if c in mtf_display.columns]], use_container_width=True, hide_index=True)
 
+elif page == "Structure Levels":
+    st.subheader("Structure Levels")
+    cols = st.columns(4)
+    cols[0].metric("Support", fmt_price(market.support), market.support_label)
+    cols[1].metric("Resistance", fmt_price(market.resistance), market.resistance_label)
+    cols[2].metric("Prev day low", fmt_price(market.previous_day_low))
+    cols[3].metric("Prev day high", fmt_price(market.previous_day_high))
+    rows = [
+        {"level": "support", "price": market.support, "source": market.support_label},
+        {"level": "resistance", "price": market.resistance, "source": market.resistance_label},
+        {"level": "swing_low", "price": market.swing_low, "source": "recent swing"},
+        {"level": "swing_high", "price": market.swing_high, "source": "recent swing"},
+        {"level": "asia_low", "price": market.asia_low, "source": "session"},
+        {"level": "asia_high", "price": market.asia_high, "source": "session"},
+        {"level": "london_low", "price": market.london_low, "source": "session"},
+        {"level": "london_high", "price": market.london_high, "source": "session"},
+        {"level": "round_support", "price": market.round_support, "source": "round number"},
+        {"level": "round_resistance", "price": market.round_resistance, "source": "round number"},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if market.liquidity_sweep_up or market.liquidity_sweep_down:
+        st.warning(f"Liquidity sweep up={market.liquidity_sweep_up}, down={market.liquidity_sweep_down}")
+
+elif page == "Score Breakdown":
+    st.subheader("Bull/Bear Score Breakdown")
+    st.dataframe(_score_breakdown_table(scores), use_container_width=True, hide_index=True)
+    if scores.get("notes"):
+        st.info("; ".join(scores.get("notes", [])))
+
+elif page == "Exhaustion Guard":
+    st.subheader("Exhaustion Guard")
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("State", exhaustion_dict.get("state", "clear"))
+    e2.metric("Block BUY", str(exhaustion_dict.get("block_buy", False)))
+    e3.metric("Block SELL", str(exhaustion_dict.get("block_sell", False)))
+    e4.metric("Range position", fmt_metric(exhaustion_dict.get("range_position_pct"), 1))
+    if exhaustion_dict.get("warnings"):
+        st.warning("; ".join(exhaustion_dict.get("warnings", [])))
+    st.json(exhaustion_dict)
+
 elif page == "Scalp Gate":
     st.subheader("Scalp Gate")
-    st.caption("Sniper mode: bias gives direction, 5m gives trigger, 15m checks danger. KC and RSI are live guards. TP2 stays in the edge calculation.")
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Recommendation", scalp_decision.recommendation); m1.caption("Final answer.")
     m2.metric("Side", scalp_decision.side); m2.caption("Allowed direction.")
@@ -594,7 +651,6 @@ elif page == "Scalp Gate":
 
 elif page == "Multi-Horizon Forecast":
     st.subheader("Multi-Horizon Forecast")
-    st.caption("Clean empirical mode: BUY and SELL levels come from actual historical forward candles matching the current setup.")
     horizon_display = _display_horizon_table(horizon_forecasts)
     main_cols = ["horizon", "bars_ahead", "side", "status", "engine_preferred", "entry", "stop_loss", "take_profit_1", "take_profit_2", "historical_direction_probability_pct", "sample_count"]
     st.dataframe(horizon_display[[c for c in main_cols if c in horizon_display.columns]], use_container_width=True)
@@ -626,6 +682,15 @@ elif page == "Settings":
     st.json(settings)
     st.download_button("Download settings YAML", yaml.safe_dump(settings, sort_keys=False), file_name="active_settings.yaml")
 
+elif page == "Scan History":
+    st.subheader("Scan History")
+    history = read_scan_log(limit=300)
+    if history.empty:
+        st.info("No scans logged yet. Click Scan scalp now on Sniper Dashboard or Forecast Manager.")
+    else:
+        st.dataframe(history, use_container_width=True)
+        st.download_button("Download scan history CSV", history.to_csv(index=False), file_name="xauusd_scan_history.csv")
+
 elif page == "Log Snapshot":
     row = {
         "source": feed.source,
@@ -644,7 +709,11 @@ elif page == "Log Snapshot":
         "bias_validation_verdict": bias_validation.get("overall_verdict"),
         "mtf_side": mtf_confirmation.get("side"),
         "mtf_verdict": mtf_confirmation.get("verdict"),
-        "mtf_reasons": "; ".join(mtf_confirmation.get("reasons", [])),
+        "exhaustion_state": exhaustion_dict.get("state"),
+        "support": market.support,
+        "support_label": market.support_label,
+        "resistance": market.resistance,
+        "resistance_label": market.resistance_label,
         "entry_zone_low": plan_value(display_plan, "entry_zone_low"),
         "entry_zone_high": plan_value(display_plan, "entry_zone_high"),
         "stop_loss": plan_value(display_plan, "stop"),
