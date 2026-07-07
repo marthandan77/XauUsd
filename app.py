@@ -21,7 +21,39 @@ from src.trade_plan import advisory_position_size, build_trade_plan
 from src.veto_engine import apply_veto
 
 ROOT = Path(__file__).resolve().parent
+RUNTIME_SETTINGS_PATH = ROOT / "data" / "runtime_settings.yaml"
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
+PERSISTED_SETTING_KEYS = {
+    "price_interval",
+    "price_period",
+    "data_mode",
+    "macro_bias",
+    "buy_threshold",
+    "sell_threshold",
+    "wait_threshold",
+    "atr_multiplier",
+    "min_reward_risk",
+    "middle_range_lower_pct",
+    "middle_range_upper_pct",
+    "kc_squeeze_enabled",
+    "bb_length",
+    "bb_mult",
+    "kc_length",
+    "kc_mult",
+    "trend_length",
+    "atr_period",
+    "atr_stop_multiplier",
+    "atr_tp_multiplier",
+    "sell_tp1_atr_multiplier",
+    "sell_tp2_atr_multiplier",
+    "sell_support_buffer_atr",
+    "risk_per_trade_pct",
+    "long_plans_enabled",
+    "short_plans_enabled",
+    "show_bollinger_bands",
+    "show_keltner_channels",
+    "news_block_manual",
+}
 
 st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
 
@@ -29,7 +61,29 @@ st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
 def load_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def load_settings() -> dict:
+    settings = load_yaml(ROOT / "config/default_settings.yaml")
+    saved = load_yaml(RUNTIME_SETTINGS_PATH)
+    if saved:
+        settings.update({k: v for k, v in saved.items() if k in PERSISTED_SETTING_KEYS})
+    return settings
+
+
+def save_runtime_settings(settings: dict) -> None:
+    RUNTIME_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    saved = {k: settings[k] for k in sorted(PERSISTED_SETTING_KEYS) if k in settings}
+    RUNTIME_SETTINGS_PATH.write_text(yaml.safe_dump(saved, sort_keys=False), encoding="utf-8")
+
+
+def reset_runtime_settings() -> None:
+    if RUNTIME_SETTINGS_PATH.exists():
+        RUNTIME_SETTINGS_PATH.unlink()
 
 
 def _select_index(options: list[str], value: str) -> int:
@@ -47,6 +101,14 @@ def refresh_panel() -> None:
     if st.sidebar.button("Manual refresh now", type="primary"):
         st.rerun()
     st.sidebar.caption("Auto-refresh is disabled. The app refreshes only when you press the button or manually reload the browser.")
+
+
+def persistence_panel() -> None:
+    st.sidebar.header("Settings memory")
+    st.sidebar.caption("Sidebar controls auto-save to data/runtime_settings.yaml and reload after browser refresh.")
+    if st.sidebar.button("Reset saved sidebar settings"):
+        reset_runtime_settings()
+        st.rerun()
 
 
 def fmt_price(value) -> str:
@@ -173,7 +235,13 @@ def settings_panel(settings: dict, presets: dict) -> dict:
 
 def load_bars(settings: dict) -> FeedResult:
     st.sidebar.header("Data")
-    data_mode = st.sidebar.radio("Data mode", ["Twelve Data API", "CSV upload", "Sample"], index=0)
+    data_mode_options = ["Twelve Data API", "CSV upload", "Sample"]
+    data_mode = st.sidebar.radio(
+        "Data mode",
+        data_mode_options,
+        index=_select_index(data_mode_options, str(settings.get("data_mode", "Twelve Data API"))),
+    )
+    settings["data_mode"] = data_mode
     if data_mode == "CSV upload":
         uploaded = st.sidebar.file_uploader("Upload OHLC CSV", type=["csv"])
         if uploaded is not None:
@@ -184,7 +252,7 @@ def load_bars(settings: dict) -> FeedResult:
             "Twelve Data API key - optional local session override",
             value="",
             type="password",
-            help="Use this only if Streamlit cannot see your Windows environment variable. The key is not saved to GitHub.",
+            help="Use this only if Streamlit cannot see your Windows environment variable. The key is not saved to GitHub or runtime settings.",
         )
         if key_input.strip():
             settings["twelve_data_api_key_runtime"] = key_input.strip()
@@ -235,12 +303,18 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
     return fig
 
 
-settings = load_yaml(ROOT / "config/default_settings.yaml")
+settings = load_settings()
 presets = load_yaml(ROOT / "config/presets.yaml")
 settings = settings_panel(settings, presets)
 refresh_panel()
-macro_bias = st.sidebar.selectbox("Macro bias", ["mixed", "supportive", "restrictive"], index=0)
+persistence_panel()
+macro_options = ["mixed", "supportive", "restrictive"]
+macro_bias = st.sidebar.selectbox(
+    "Macro bias", macro_options, index=_select_index(macro_options, str(settings.get("macro_bias", "mixed")))
+)
+settings["macro_bias"] = macro_bias
 feed = load_bars(settings)
+save_runtime_settings(settings)
 
 bars_raw = add_indicators(feed.bars, settings)
 bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
