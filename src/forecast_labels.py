@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import pandas as pd
 
+# Based on the default 15-minute chart:
+# 15m = next 1 candle, 1h = next 4 candles, 4h = next 16 candles, Day = next 96 candles.
 HORIZONS: dict[str, int] = {
-    "30m": 2,
+    "15m": 1,
     "1h": 4,
     "4h": 16,
-    "8h": 32,
+    "Day": 96,
 }
 
 
