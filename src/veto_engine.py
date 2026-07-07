@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from .trade_plan import room_ratio
 
-
 ACTIONABLE_PLANS = {"BUY PLAN", "SELL PLAN"}
 
 
-def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settings: dict) -> dict:
+def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settings: dict, exhaustion: dict | None = None) -> dict:
     reasons: list[str] = []
     if macro.get("blocked"):
         reasons.append("event block active")
@@ -22,6 +21,12 @@ def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settin
         reasons.append("too close to support")
     if action == "SELL PLAN" and not bool(settings.get("short_plans_enabled", False)):
         reasons.append("short plans disabled")
+
+    if exhaustion:
+        if action == "BUY PLAN" and bool(exhaustion.get("block_buy", False)):
+            reasons.append("bull exhaustion risk; avoid chasing BUY")
+        if action == "SELL PLAN" and bool(exhaustion.get("block_sell", False)):
+            reasons.append("bear exhaustion risk; avoid chasing SELL")
 
     rr = room_ratio(action, plan, market)
     if action in ACTIONABLE_PLANS and rr < float(settings.get("min_reward_risk", 1.5)):
