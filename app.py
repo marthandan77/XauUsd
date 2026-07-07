@@ -153,8 +153,9 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["atr_stop_multiplier"] = st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1)
     settings["atr_tp_multiplier"] = st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1)
     settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
-    settings["long_plans_enabled"] = st.sidebar.toggle("Enable long plans", bool(settings.get("long_plans_enabled", True)))
-    settings["short_plans_enabled"] = st.sidebar.toggle("Enable short plans", bool(settings.get("short_plans_enabled", False)))
+    settings["long_plans_enabled"] = True
+    settings["short_plans_enabled"] = True
+    st.sidebar.caption("BUY and SELL plan processing is always enabled.")
     settings["show_bollinger_bands"] = st.sidebar.toggle("Show Bollinger Bands", bool(settings.get("show_bollinger_bands", True)))
     settings["show_keltner_channels"] = st.sidebar.toggle("Show Keltner Channels", bool(settings.get("show_keltner_channels", True)))
     settings["news_block_manual"] = st.sidebar.toggle("Manual event block", bool(settings.get("news_block_manual", False)))
