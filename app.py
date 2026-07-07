@@ -73,10 +73,49 @@ def fmt_units(value) -> str:
     return f"{value:,.2f}"
 
 
-def active_value(plan: dict, key: str, final_action: str):
-    if final_action not in ACTIONABLE:
+def has_plan_levels(plan: dict) -> bool:
+    return plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None
+
+
+def plan_value(plan: dict, key: str):
+    if not has_plan_levels(plan):
         return None
     return plan.get(key)
+
+
+def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
+    """Build non-executable candidate levels when the forecast is useful but official action is blocked/waiting."""
+    threshold = int(settings.get("forecast_threshold", 65))
+    bias = str(scores.get("bias", "mixed"))
+    bull_score = int(scores.get("bull_score", 0))
+    bear_score = int(scores.get("bear_score", 0))
+
+    if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
+        plan = build_trade_plan("BUY PLAN", market, settings)
+        plan["note"] = "Bullish forecast candidate. Use only if final action is BUY PLAN and veto filters are clean."
+        return "BUY CANDIDATE", plan, "Bullish candidate levels shown because bull forecast is above forecast threshold."
+
+    if bias == "bearish" and bear_score >= threshold:
+        preview_settings = dict(settings)
+        preview_settings["short_plans_enabled"] = True
+        plan = build_trade_plan("SELL PLAN", market, preview_settings)
+        if bool(settings.get("short_plans_enabled", False)):
+            plan["note"] = "Bearish forecast candidate. Use only if final action is SELL PLAN and veto filters are clean."
+            return "SELL CANDIDATE", plan, "Bearish candidate levels shown because bear forecast is above forecast threshold."
+        plan["note"] = "Bearish forecast preview only. Short plans are disabled, so this is not an active SELL PLAN."
+        return "SELL PREVIEW ONLY", plan, "Bearish forecast met, but short plans are disabled in settings. Enable short plans for active SELL entry/TP/SL."
+
+    return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "No forecast candidate above threshold."}, ""
+
+
+def plan_status(action: str, final_action: str, plan: dict, candidate_action: str, candidate_note: str) -> str:
+    if final_action in ACTIONABLE:
+        return f"Active {final_action}"
+    if action in ACTIONABLE and has_plan_levels(plan):
+        return f"Rejected {action}"
+    if candidate_action != "NO CANDIDATE":
+        return candidate_action
+    return "No entry plan"
 
 
 def settings_panel(settings: dict, presets: dict) -> dict:
@@ -213,10 +252,13 @@ if kc["state"] != "insufficient_data":
     scores["kc_reason"] = kc["reason"]
 action = choose_action(scores, settings)
 plan = build_trade_plan(action, market, settings)
+candidate_action, candidate_plan, candidate_note = candidate_plan_from_scores(scores, market, settings)
 bands = price_bands(market, regime)
 veto = apply_veto(action, plan, market, regime, macro, settings)
 summary = explain(regime, scores, veto, market, macro)
 active_plan = veto["final_action"] in ACTIONABLE
+status = plan_status(action, veto["final_action"], plan, candidate_action, candidate_note)
+display_plan = plan if has_plan_levels(plan) else candidate_plan
 
 advisory_qty = 0.0
 if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
@@ -240,11 +282,12 @@ if feed.warning:
     st.warning(feed.warning)
 
 if page == "Forecast Manager":
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Final action", veto["final_action"])
-    c2.metric("Quality", veto["trade_quality"])
-    c3.metric("Regime", regime)
-    c4.metric("Confidence", scores["confidence"])
+    c2.metric("Raw action", action)
+    c3.metric("Plan status", status)
+    c4.metric("Regime", regime)
+    c5.metric("Confidence", scores["confidence"])
     s1, s2, s3, s4 = st.columns(4)
     s1.metric("Bull score", scores["bull_score"])
     s2.metric("Bear score", scores["bear_score"])
@@ -252,16 +295,20 @@ if page == "Forecast Manager":
     s4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
     st.info(summary)
     st.caption(plan.get("note", ""))
+    if candidate_note and (not has_plan_levels(plan) or veto["final_action"] not in ACTIONABLE):
+        st.warning(candidate_note)
     if veto["reasons"]:
         st.error("Veto reasons: " + "; ".join(veto["reasons"]))
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Entry zone low", fmt_price(active_value(plan, "entry_zone_low", veto["final_action"])))
-    p2.metric("Entry zone high", fmt_price(active_value(plan, "entry_zone_high", veto["final_action"])))
-    p3.metric("Guard level", fmt_price(active_value(plan, "stop", veto["final_action"])))
-    p4.metric("Target 1", fmt_price(active_value(plan, "tp1", veto["final_action"])))
+    p1.metric("Entry zone low", fmt_price(plan_value(display_plan, "entry_zone_low")))
+    p2.metric("Entry zone high", fmt_price(plan_value(display_plan, "entry_zone_high")))
+    p3.metric("Guard level", fmt_price(plan_value(display_plan, "stop")))
+    p4.metric("Target 1", fmt_price(plan_value(display_plan, "tp1")))
     p5, p6 = st.columns(2)
-    p5.metric("Target 2", fmt_price(active_value(plan, "tp2", veto["final_action"])))
+    p5.metric("Target 2", fmt_price(plan_value(display_plan, "tp2")))
     p6.metric("Advisory units @ $10k equity", fmt_units(advisory_qty))
+    if status != f"Active {veto['final_action']}":
+        st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
     st.subheader("Price and indicators")
     st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
@@ -298,15 +345,18 @@ elif page == "Log Snapshot":
         "kc_state": kc["state"],
         "bias": scores["bias"],
         "confidence": scores["confidence"],
+        "raw_action": action,
         "final_action": veto["final_action"],
+        "plan_status": status,
         "quality": veto["trade_quality"],
         "veto_reasons": "; ".join(veto["reasons"]),
-        "entry_zone_low": active_value(plan, "entry_zone_low", veto["final_action"]),
-        "entry_zone_high": active_value(plan, "entry_zone_high", veto["final_action"]),
-        "guard_level": active_value(plan, "stop", veto["final_action"]),
-        "target_1": active_value(plan, "tp1", veto["final_action"]),
-        "target_2": active_value(plan, "tp2", veto["final_action"]),
+        "entry_zone_low": plan_value(display_plan, "entry_zone_low"),
+        "entry_zone_high": plan_value(display_plan, "entry_zone_high"),
+        "guard_level": plan_value(display_plan, "stop"),
+        "target_1": plan_value(display_plan, "tp1"),
+        "target_2": plan_value(display_plan, "tp2"),
         "advisory_units_10k": advisory_qty if active_plan else None,
+        "candidate_note": candidate_note,
         "plan_note": plan.get("note", ""),
     }
     snap = pd.DataFrame([row])
