@@ -549,8 +549,6 @@ if page == "Forecast Manager":
     p6.metric("Advisory units @ $10k equity", fmt_units(advisory_qty))
     if status != f"Active {veto['final_action']}":
         st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
-    st.subheader("Price and indicators")
-    st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
 elif page == "Scalp Gate":
     st.subheader("Scalp Gate")
