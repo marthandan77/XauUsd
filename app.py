@@ -370,6 +370,30 @@ def _display_horizon_table(forecasts) -> pd.DataFrame:
     return display
 
 
+def _scalp_status_note(status: str) -> str:
+    return {
+        "VALID": "Usable sample.",
+        "INSUFFICIENT_DATA": "Too few matches.",
+        "INSUFFICIENT_VALIDATION": "Too few recent tests.",
+        "NO_EDGE": "No positive edge.",
+        "UNAVAILABLE": "Use 5m timeframe.",
+    }.get(str(status), "Check row.")
+
+
+def _scalp_row_explanation(row: pd.Series) -> str:
+    status = str(row.get("status", ""))
+    if status != "VALID":
+        return _scalp_status_note(status)
+    edge = float(row.get("scalp_edge", 0.0) or 0.0)
+    tp1 = float(row.get("tp1_hit_rate_pct", 0.0) or 0.0)
+    sl = float(row.get("sl_hit_rate_pct", 0.0) or 0.0)
+    if edge > 0 and tp1 > sl:
+        return "Good edge."
+    if edge < 0:
+        return "Negative edge."
+    return "Weak edge."
+
+
 def _display_scalp_table(scalp_decision) -> pd.DataFrame:
     table = scalp_horizon_table(scalp_decision)
     if table.empty:
@@ -391,7 +415,44 @@ def _display_scalp_table(scalp_decision) -> pd.DataFrame:
     for col in numeric_cols:
         if col in display:
             display[col] = display[col].apply(lambda value: None if pd.isna(value) else round(float(value), 2))
+    display["explanation"] = display.apply(_scalp_row_explanation, axis=1)
     return display
+
+
+def _horizon_value(scalp_display: pd.DataFrame, horizon: str, column: str):
+    if scalp_display.empty or column not in scalp_display.columns:
+        return None
+    row = scalp_display[scalp_display["horizon"] == horizon]
+    if row.empty:
+        return None
+    value = row.iloc[0].get(column)
+    if pd.isna(value):
+        return None
+    return value
+
+
+def _scalp_value_guide(scalp_decision, scalp_display: pd.DataFrame) -> pd.DataFrame:
+    five_edge = _horizon_value(scalp_display, "5m", "scalp_edge")
+    fifteen_edge = _horizon_value(scalp_display, "15m", "scalp_edge")
+    rows = [
+        ("Recommendation", scalp_decision.recommendation, "Final answer."),
+        ("Side", scalp_decision.side, "Allowed direction."),
+        ("Room ratio", fmt_metric(scalp_decision.room_ratio, 2), "Space vs risk."),
+        ("RSI", fmt_metric(scalp_decision.rsi, 1), "Overbought/oversold guard."),
+        ("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2), "Negative=down, positive=up."),
+        ("5m scalp edge", fmt_metric(five_edge, 2), "Trigger. >0 good."),
+        ("15m scalp edge", fmt_metric(fifteen_edge, 2), "Danger check. <0 bad."),
+        ("TP1 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp1_hit_rate_pct"), 1), "Fast target odds."),
+        ("TP2 hit %", fmt_metric(_horizon_value(scalp_display, "5m", "tp2_hit_rate_pct"), 1), "Stretch target odds."),
+        ("SL hit %", fmt_metric(_horizon_value(scalp_display, "5m", "sl_hit_rate_pct"), 1), "Stop-loss odds."),
+        ("Train samples", _horizon_value(scalp_display, "5m", "train_samples") or "N/A", "Old samples used."),
+        ("Validation samples", _horizon_value(scalp_display, "5m", "validation_samples") or "N/A", "Recent samples tested."),
+        ("Entry", fmt_price(_horizon_value(scalp_display, "5m", "entry")), "Current price used."),
+        ("Stop Loss", fmt_price(_horizon_value(scalp_display, "5m", "stop_loss")), "Invalidation price."),
+        ("Take Profit 1", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_1")), "Fast target."),
+        ("Take Profit 2", fmt_price(_horizon_value(scalp_display, "5m", "take_profit_2")), "Stretch target."),
+    ]
+    return pd.DataFrame(rows, columns=["Value", "Now", "Very short meaning"])
 
 
 settings = load_settings()
@@ -500,19 +561,27 @@ elif page == "Scalp Gate":
     )
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Recommendation", scalp_decision.recommendation)
+    m1.caption("Final answer.")
     m2.metric("Side", scalp_decision.side)
+    m2.caption("Allowed direction.")
     m3.metric("Room ratio", fmt_metric(scalp_decision.room_ratio, 2))
+    m3.caption("Space vs risk.")
     m4.metric("RSI", fmt_metric(scalp_decision.rsi, 1))
+    m4.caption("Overbought/oversold guard.")
     m5.metric("KC momentum", fmt_metric(scalp_decision.kc_momentum, 2))
+    m5.caption("Negative=down, positive=up.")
     if scalp_decision.reasons:
         st.error("NO SCALP reasons: " + "; ".join(scalp_decision.reasons))
     else:
         st.success("Scalp Gate is open. Use manual execution only; no broker execution is connected.")
     scalp_display = _display_scalp_table(scalp_decision)
+    st.subheader("Very short value guide")
+    st.dataframe(_scalp_value_guide(scalp_decision, scalp_display), use_container_width=True, hide_index=True)
     scalp_cols = [
         "horizon",
         "side",
         "status",
+        "explanation",
         "entry",
         "stop_loss",
         "take_profit_1",
