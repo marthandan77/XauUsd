@@ -227,7 +227,6 @@ def plan_value(plan: dict, key: str):
 
 
 def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
-    """Build non-executable candidate levels when the forecast is useful but official action is blocked/waiting."""
     if bool(settings.get("signals_disabled", False)):
         return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "Signals disabled until real data is active."}, ""
 
@@ -241,30 +240,34 @@ def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[st
 
     if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
         plan = build_trade_plan("BUY PLAN", market, settings)
-        plan["note"] = "Bullish forecast candidate. Use only if final action is BUY PLAN and veto filters are clean."
-        return "BUY CANDIDATE", plan, "Bullish candidate levels shown because bull forecast is above forecast threshold."
+        plan["note"] = "Bullish preview only. Use only if final action becomes BUY PLAN and veto filters are clean."
+        return "BUY CANDIDATE", plan, "Buyer pressure is developing, but this is preview only unless final action is BUY PLAN."
 
     if bias == "bearish" and bear_score >= threshold:
         preview_settings = dict(settings)
         preview_settings["short_plans_enabled"] = True
         plan = build_trade_plan("SELL PLAN", market, preview_settings)
         if bool(settings.get("short_plans_enabled", False)):
-            plan["note"] = "Bearish forecast candidate. Use only if final action is SELL PLAN and veto filters are clean."
-            return "SELL CANDIDATE", plan, "Bearish candidate levels shown because bear forecast is above forecast threshold."
-        plan["note"] = "Bearish forecast preview only. Short plans are disabled, so this is not an active SELL PLAN."
-        return "SELL PREVIEW ONLY", plan, "Bearish forecast met, but short plans are disabled in settings. Enable short plans for active SELL entry/TP/SL."
+            plan["note"] = "Bearish preview only. Use only if final action becomes SELL PLAN and veto filters are clean."
+            return "SELL CANDIDATE", plan, "Seller pressure is developing, but this is preview only unless final action is SELL PLAN."
+        plan["note"] = "Bearish preview only. Short plans are disabled, so this is not an active SELL PLAN."
+        return "SELL PREVIEW ONLY", plan, "Seller pressure is developing, but this is not an active sell signal."
 
-    return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "No forecast candidate above threshold."}, ""
+    return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "No active trade plan. Wait for a cleaner case."}, ""
 
 
 def plan_status(action: str, final_action: str, plan: dict, candidate_action: str, candidate_note: str) -> str:
-    if final_action in ACTIONABLE:
-        return f"Active {final_action}"
+    if final_action == "BUY PLAN":
+        return "Buy allowed"
+    if final_action == "SELL PLAN":
+        return "Sell allowed"
+    if candidate_action == "BUY CANDIDATE":
+        return "Buyer pressure only"
+    if candidate_action in {"SELL CANDIDATE", "SELL PREVIEW ONLY"}:
+        return "Seller pressure only"
     if action in ACTIONABLE and has_plan_levels(plan):
         return f"Rejected {action}"
-    if candidate_action != "NO CANDIDATE":
-        return candidate_action
-    return "No entry plan"
+    return "No active trade"
 
 
 def settings_panel(settings: dict, presets: dict) -> dict:
@@ -463,16 +466,7 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
 def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go.Figure:
     chart_df = df.tail(220)
     fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=chart_df.index,
-            open=chart_df["open"],
-            high=chart_df["high"],
-            low=chart_df["low"],
-            close=chart_df["close"],
-            name="XAU/USD",
-        )
-    )
+    fig.add_trace(go.Candlestick(x=chart_df.index, open=chart_df["open"], high=chart_df["high"], low=chart_df["low"], close=chart_df["close"], name="XAU/USD"))
     for column, label in [("ema_fast", "EMA Fast"), ("ema_slow", "EMA Slow"), ("trend_sma", "Trend SMA")]:
         if column in chart_df:
             fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df[column], mode="lines", name=label))
@@ -490,16 +484,7 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
             fig.add_trace(go.Scatter(x=release_df.index, y=release_df["close"], mode="markers", name="KC Release"))
     if action in ACTIONABLE and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None:
         marker_price = (float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0
-        fig.add_trace(
-            go.Scatter(
-                x=[chart_df.index[-1]],
-                y=[marker_price],
-                mode="markers+text",
-                text=[action],
-                textposition="top center",
-                name="Advisory signal",
-            )
-        )
+        fig.add_trace(go.Scatter(x=[chart_df.index[-1]], y=[marker_price], mode="markers+text", text=[action], textposition="top center", name="Advisory signal"))
     fig.update_layout(height=640, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
     return fig
 
@@ -524,46 +509,229 @@ def render_source_metrics(result: dict) -> None:
         st.error(result["settings"].get("signals_disabled_reason", "Signals disabled."))
 
 
-def render_forecast_manager(result: dict) -> None:
-    render_source_metrics(result)
-    if not result.get("ok"):
-        st.error(result.get("error", "Scan failed."))
+def score_label(score: int, threshold: int) -> str:
+    if score >= threshold:
+        return "strong enough for a trade check"
+    if score >= 65:
+        return "medium pressure, watch only"
+    if score >= 50:
+        return "developing pressure"
+    return "weak pressure"
+
+
+def regime_label(regime: str) -> str:
+    return {
+        "range": "sideways market",
+        "bull_trend": "buyers controlling the trend",
+        "bear_trend": "sellers controlling the trend",
+        "compression": "market storing energy before a breakout",
+        "squeeze_release_now": "KC compression just released, direction not confirmed",
+        "squeeze_release_recent": "recent KC release, direction not confirmed",
+        "bullish_release_confirmed": "upside breakout confirmed",
+        "bearish_release_confirmed": "downside breakout confirmed",
+        "bullish_release_overextended": "upside breakout is already stretched",
+        "bearish_release_overextended": "downside breakout is already stretched",
+        "shock": "abnormal volatility, avoid new trades",
+    }.get(regime, regime.replace("_", " "))
+
+
+def price_location_label(range_position: float) -> str:
+    if range_position <= 30:
+        return "near support / lower part of the range"
+    if range_position >= 70:
+        return "near resistance / upper part of the range"
+    return "middle of the range"
+
+
+def room_label(room_ratio: float) -> str:
+    if room_ratio >= 1.5:
+        return "good target room"
+    if room_ratio >= 1.2:
+        return "acceptable target room"
+    if room_ratio >= 0.8:
+        return "borderline target room"
+    return "poor target room"
+
+
+def setup_label(result: dict) -> str:
+    final_action = result["veto"]["final_action"]
+    candidate = result["candidate_action"]
+    if final_action == "BUY PLAN":
+        return "Buy setup is actionable."
+    if final_action == "SELL PLAN":
+        return "Sell setup is actionable."
+    if candidate == "BUY CANDIDATE":
+        return "Buyer pressure exists, but it is not an active buy signal."
+    if candidate in {"SELL CANDIDATE", "SELL PREVIEW ONLY"}:
+        return "Seller pressure exists, but it is not an active sell signal."
+    return "No clear trade setup yet."
+
+
+def build_simple_market_case(result: dict) -> dict:
+    scores = result["scores"]
+    market = result["market"]
+    veto = result["veto"]
+    settings = result["settings"]
+    bull = int(scores.get("bull_score", 0))
+    bear = int(scores.get("bear_score", 0))
+    buy_threshold = int(settings.get("buy_threshold", 78))
+    sell_threshold = int(settings.get("sell_threshold", 78))
+    room_ratio = float(veto.get("room_ratio", 0.0) or 0.0)
+    range_position = float(market.range_position_pct)
+    final_action = str(veto.get("final_action", "HOLD"))
+
+    side = "buyers" if bull > bear else "sellers" if bear > bull else "neither side"
+    strength = max(bull, bear)
+    strength_text = score_label(strength, buy_threshold if bull >= bear else sell_threshold)
+    market_type = regime_label(result["regime"])
+    location = price_location_label(range_position)
+    room = room_label(room_ratio)
+
+    if final_action == "BUY PLAN":
+        permission = "BUY ALLOWED"
+        permission_detail = "The buy setup passed the current trade checks."
+    elif final_action == "SELL PLAN":
+        permission = "SELL ALLOWED"
+        permission_detail = "The sell setup passed the current trade checks."
+    elif final_action == "WAIT":
+        permission = "WAIT — NO TRADE"
+        permission_detail = "There is pressure in one direction, but the setup is not clean enough to trade."
+    else:
+        permission = "HOLD — NO EDGE"
+        permission_detail = "The market does not show a clean trading edge right now."
+
+    case_lines = [
+        f"Gold is in a {market_type}.",
+        f"Current advantage: {side} with {strength_text}.",
+        f"Price location: {location} at {range_position:.1f}% of the recent range.",
+        f"Target room: {room} with room ratio {room_ratio:.2f}.",
+        setup_label(result),
+    ]
+
+    why_lines = []
+    if bear > bull:
+        why_lines.append(f"Seller strength is {bear}/100. Sell trigger needs {sell_threshold}/100.")
+    elif bull > bear:
+        why_lines.append(f"Buyer strength is {bull}/100. Buy trigger needs {buy_threshold}/100.")
+    else:
+        why_lines.append(f"Buyer and seller strength are balanced at {bull}/100.")
+    why_lines.append(f"Buyer strength: {bull}/100. Seller strength: {bear}/100. These are signal-strength scores, not win probabilities.")
+    why_lines.append(f"Price is {location}. Range position is {range_position:.1f}%.")
+    why_lines.append(f"Target room is {room}. Room ratio is {room_ratio:.2f}.")
+    if veto.get("reasons"):
+        why_lines.extend([f"Blocked by: {reason}." for reason in veto["reasons"]])
+    elif final_action not in ACTIONABLE:
+        why_lines.append("No veto rejection, but score/location/room are not strong enough for an active trade.")
+
+    next_lines = []
+    if final_action in ACTIONABLE:
+        next_lines.append("Use the displayed entry, stop, and TP levels only if you agree with the setup manually.")
+    else:
+        next_lines.append("For sell: wait for seller strength above trigger, price closer to resistance, or a confirmed bearish breakdown with enough target room.")
+        next_lines.append("For buy: wait for buyer strength above trigger, price closer to support, or a confirmed bullish breakout with enough target room.")
+        next_lines.append("If target room stays poor, skip the trade.")
+
+    return {
+        "permission": permission,
+        "permission_detail": permission_detail,
+        "case_lines": case_lines,
+        "why_lines": why_lines,
+        "next_lines": next_lines,
+        "buyer_strength": bull,
+        "seller_strength": bear,
+        "room_quality": room,
+        "price_location": location,
+    }
+
+
+def render_simple_case_panel(result: dict) -> None:
+    case = build_simple_market_case(result)
+    st.subheader("Actual market case")
+    st.info("\n\n".join(case["case_lines"]))
+
+    st.subheader("Trade permission")
+    if result["veto"]["final_action"] in ACTIONABLE:
+        st.success(f"{case['permission']} — {case['permission_detail']}")
+    else:
+        st.warning(f"{case['permission']} — {case['permission_detail']}")
+
+    c1, c2 = st.columns(2)
+    c1.metric("Buyer strength", f"{case['buyer_strength']}/100")
+    c2.metric("Seller strength", f"{case['seller_strength']}/100")
+    st.caption("Strength score is not win probability. It is the engine's raw signal pressure score.")
+
+    st.subheader("Why")
+    for line in case["why_lines"]:
+        st.write(f"- {line}")
+
+    st.subheader("What to wait for")
+    for line in case["next_lines"]:
+        st.write(f"- {line}")
+
+
+def render_trade_levels(result: dict) -> None:
+    veto = result["veto"]
+    display_plan = result["display_plan"]
+    if veto["final_action"] not in ACTIONABLE:
+        st.subheader("Trade levels")
+        st.write("No active trade plan. Candidate levels are hidden to avoid accidental trading.")
+        if result["candidate_action"] != "NO CANDIDATE":
+            with st.expander("Preview levels only — not a signal"):
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Entry low", fmt_price(plan_value(display_plan, "entry_zone_low")))
+                p2.metric("Entry high", fmt_price(plan_value(display_plan, "entry_zone_high")))
+                p3.metric("Stop", fmt_price(plan_value(display_plan, "stop")))
+                p4.metric("TP1", fmt_price(plan_value(display_plan, "tp1")))
+                p5, p6 = st.columns(2)
+                p5.metric("TP2", fmt_price(plan_value(display_plan, "tp2")))
+                p6.metric("TP1 distance ATR", fmt_number(display_plan.get("tp1_distance_atr"), 2))
         return
 
-    scores = result["scores"]
-    veto = result["veto"]
-    plan = result["plan"]
-    display_plan = result["display_plan"]
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Final action", veto["final_action"])
-    c2.metric("Raw action", result["action"])
-    c3.metric("Plan status", result["status"])
-    c4.metric("Regime", result["regime"])
-    c5.metric("Confidence", scores["confidence"])
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Bull score", scores["bull_score"])
-    s2.metric("Bear score", scores["bear_score"])
-    s3.metric("Range position", f"{result['market'].range_position_pct:.1f}%")
-    s4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
-    st.info(result["summary"])
-    if scores.get("force_wait") and scores.get("wait_reason"):
-        st.warning(scores["wait_reason"])
-    st.caption(plan.get("note", ""))
-    if result["candidate_note"] and (not has_plan_levels(plan) or veto["final_action"] not in ACTIONABLE):
-        st.warning(result["candidate_note"])
-    if veto["reasons"]:
-        st.error("Veto reasons: " + "; ".join(veto["reasons"]))
+    st.subheader("Active trade levels")
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Entry zone low", fmt_price(plan_value(display_plan, "entry_zone_low")))
-    p2.metric("Entry zone high", fmt_price(plan_value(display_plan, "entry_zone_high")))
+    p1.metric("Entry low", fmt_price(plan_value(display_plan, "entry_zone_low")))
+    p2.metric("Entry high", fmt_price(plan_value(display_plan, "entry_zone_high")))
     p3.metric("Stop Loss", fmt_price(plan_value(display_plan, "stop")))
     p4.metric("Take Profit 1", fmt_price(plan_value(display_plan, "tp1")))
     p5, p6, p7 = st.columns(3)
     p5.metric("Take Profit 2", fmt_price(plan_value(display_plan, "tp2")))
     p6.metric("TP1 distance ATR", fmt_number(display_plan.get("tp1_distance_atr"), 2))
     p7.metric("Advisory units @ $10k equity", fmt_units(result["advisory_qty"]))
-    if result["status"] != f"Active {veto['final_action']}":
-        st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
+
+
+def render_advanced_details(result: dict) -> None:
+    scores = result["scores"]
+    veto = result["veto"]
+    market = result["market"]
+    with st.expander("Advanced details"):
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Final action", veto["final_action"])
+        a2.metric("Raw action", result["action"])
+        a3.metric("Setup status", result["status"])
+        a4.metric("Regime", regime_label(result["regime"]))
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Bull score", scores["bull_score"])
+        b2.metric("Bear score", scores["bear_score"])
+        b3.metric("Range position", f"{market.range_position_pct:.1f}%")
+        b4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
+        st.write("Engine summary:")
+        st.write(result["summary"])
+        if scores.get("force_wait") and scores.get("wait_reason"):
+            st.warning(scores["wait_reason"])
+        if result["candidate_note"]:
+            st.caption(result["candidate_note"])
+        if veto["reasons"]:
+            st.error("Veto reasons: " + "; ".join(veto["reasons"]))
+
+
+def render_forecast_manager(result: dict) -> None:
+    render_source_metrics(result)
+    if not result.get("ok"):
+        st.error(result.get("error", "Scan failed."))
+        return
+    render_simple_case_panel(result)
+    render_trade_levels(result)
+    render_advanced_details(result)
 
 
 def render_kc_page(result: dict) -> None:
@@ -582,22 +750,9 @@ def render_kc_page(result: dict) -> None:
     k6.metric("Chase ATR", fmt_number(kc.get("release_chase_atr"), 2))
     st.json(kc)
     cols = [
-        "close",
-        "trend_sma",
-        "bb_upper",
-        "bb_lower",
-        "kc_upper",
-        "kc_lower",
-        "compression_ratio",
-        "squeeze_on",
-        "squeeze_fired",
-        "squeeze_recent",
-        "bars_since_squeeze_release",
-        "release_direction",
-        "release_chase_atr",
-        "release_bullish_confirmed",
-        "release_bearish_confirmed",
-        "kc_momentum",
+        "close", "trend_sma", "bb_upper", "bb_lower", "kc_upper", "kc_lower", "compression_ratio", "squeeze_on",
+        "squeeze_fired", "squeeze_recent", "bars_since_squeeze_release", "release_direction", "release_chase_atr",
+        "release_bullish_confirmed", "release_bearish_confirmed", "kc_momentum",
     ]
     st.dataframe(bars[[c for c in cols if c in bars.columns]].tail(30), use_container_width=True)
     st.plotly_chart(price_chart(bars, result["settings"], result["veto"]["final_action"], result["plan"]), use_container_width=True)
