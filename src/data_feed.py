@@ -93,6 +93,7 @@ def _get_twelve_data_api_key(settings: dict | None = None) -> str:
 
 def _twelve_interval(interval: str) -> str:
     mapping = {
+        "5m": "5min",
         "15m": "15min",
         "30m": "30min",
         "1h": "1h",
@@ -116,6 +117,7 @@ def _period_days(period: str) -> int:
 def _bars_per_day(interval: str) -> int:
     # Approximation for active weekday forex/CFD coverage. Used only to request enough bars.
     return {
+        "5m": 288,
         "15m": 96,
         "30m": 48,
         "1h": 24,
