@@ -44,9 +44,12 @@ PERSISTED_SETTING_KEYS = [
     "atr_period",
     "atr_stop_multiplier",
     "atr_tp_multiplier",
+    "buy_tp1_atr_multiplier",
+    "buy_tp2_atr_multiplier",
     "sell_tp1_atr_multiplier",
     "sell_tp2_atr_multiplier",
     "sell_support_buffer_atr",
+    "min_tp1_atr_distance",
     "risk_per_trade_pct",
     "show_bollinger_bands",
     "show_keltner_channels",
@@ -313,10 +316,15 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     st.sidebar.slider("KC chase limit ATR", 0.5, 3.0, step=0.1, key=_control_key("kc_release_chase_atr_limit"))
     st.sidebar.slider("Trend SMA length", 50, 300, key=_control_key("trend_length"))
     st.sidebar.slider("ATR period", 5, 50, key=_control_key("atr_period"))
-    st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, step=0.1, key=_control_key("atr_stop_multiplier"))
-    st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, step=0.1, key=_control_key("atr_tp_multiplier"))
-    st.sidebar.slider("Sell Take Profit 1 ATR", 0.50, 3.00, step=0.05, key=_control_key("sell_tp1_atr_multiplier"))
-    st.sidebar.slider("Sell Take Profit 2 ATR", 0.75, 5.00, step=0.05, key=_control_key("sell_tp2_atr_multiplier"))
+
+    st.sidebar.header("Trade plan")
+    st.sidebar.slider("ATR stop multiplier", 0.8, 5.0, step=0.1, key=_control_key("atr_stop_multiplier"))
+    st.sidebar.slider("Legacy ATR take-profit multiplier", 1.0, 10.0, step=0.1, key=_control_key("atr_tp_multiplier"))
+    st.sidebar.slider("Buy Take Profit 1 ATR", 0.50, 5.00, step=0.05, key=_control_key("buy_tp1_atr_multiplier"))
+    st.sidebar.slider("Buy Take Profit 2 ATR", 0.75, 8.00, step=0.05, key=_control_key("buy_tp2_atr_multiplier"))
+    st.sidebar.slider("Sell Take Profit 1 ATR", 0.50, 5.00, step=0.05, key=_control_key("sell_tp1_atr_multiplier"))
+    st.sidebar.slider("Sell Take Profit 2 ATR", 0.75, 8.00, step=0.05, key=_control_key("sell_tp2_atr_multiplier"))
+    st.sidebar.slider("Minimum TP1 distance ATR", 0.25, 3.00, step=0.05, key=_control_key("min_tp1_atr_distance"))
     st.sidebar.slider("Sell support buffer ATR", 0.00, 1.00, step=0.05, key=_control_key("sell_support_buffer_atr"))
     st.sidebar.slider("Advisory risk %", 0.1, 2.0, step=0.1, key=_control_key("risk_per_trade_pct"))
     st.sidebar.caption("BUY and SELL plan processing is always enabled.")
@@ -550,9 +558,10 @@ def render_forecast_manager(result: dict) -> None:
     p2.metric("Entry zone high", fmt_price(plan_value(display_plan, "entry_zone_high")))
     p3.metric("Stop Loss", fmt_price(plan_value(display_plan, "stop")))
     p4.metric("Take Profit 1", fmt_price(plan_value(display_plan, "tp1")))
-    p5, p6 = st.columns(2)
+    p5, p6, p7 = st.columns(3)
     p5.metric("Take Profit 2", fmt_price(plan_value(display_plan, "tp2")))
-    p6.metric("Advisory units @ $10k equity", fmt_units(result["advisory_qty"]))
+    p6.metric("TP1 distance ATR", fmt_number(display_plan.get("tp1_distance_atr"), 2))
+    p7.metric("Advisory units @ $10k equity", fmt_units(result["advisory_qty"]))
     if result["status"] != f"Active {veto['final_action']}":
         st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
 
@@ -635,6 +644,8 @@ def render_log_snapshot(result: dict) -> None:
         "stop_loss": plan_value(result["display_plan"], "stop"),
         "take_profit_1": plan_value(result["display_plan"], "tp1"),
         "take_profit_2": plan_value(result["display_plan"], "tp2"),
+        "tp1_distance_atr": result["display_plan"].get("tp1_distance_atr"),
+        "tp1_too_close": result["display_plan"].get("tp1_too_close"),
         "advisory_units_10k": result["advisory_qty"] if result["active_plan"] else None,
         "candidate_note": result["candidate_note"],
         "plan_note": result["plan"].get("note", ""),
