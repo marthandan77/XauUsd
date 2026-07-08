@@ -37,7 +37,7 @@ def _select_index(options: list[str], value: str) -> int:
 
 
 def _sample_freq(settings: dict) -> str:
-    return {"15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
+    return {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
         str(settings.get("price_interval", "15m")), "15min"
     )
 
@@ -143,7 +143,7 @@ def settings_panel(settings: dict, presets: dict) -> dict:
         if st.sidebar.button("Load preset"):
             settings.update(presets[selected])
 
-    interval_options = ["15m", "30m", "1h", "4h", "1d"]
+    interval_options = ["5m", "15m", "30m", "1h", "4h", "1d"]
     period_options = ["7d", "30d", "60d", "6mo", "1y", "2y"]
     settings["price_interval"] = st.sidebar.selectbox(
         "Timeframe", interval_options, index=_select_index(interval_options, str(settings.get("price_interval", "15m")))
@@ -357,8 +357,6 @@ if page == "Forecast Manager":
     p6.metric("Advisory units @ $10k equity", fmt_units(advisory_qty))
     if status != f"Active {veto['final_action']}":
         st.caption("Displayed levels are candidate/preview levels only. Execute manually only when final action is BUY PLAN or SELL PLAN and quality is Clean.")
-    st.subheader("Price and indicators")
-    st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
 elif page == "KC Squeeze":
     st.subheader("KC Squeeze module")
