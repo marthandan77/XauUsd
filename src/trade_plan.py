@@ -15,56 +15,82 @@ def _sell_target_before_support(price: float, raw_target: float, support_level: 
     return raw_target
 
 
+def _tp1_distance_atr(side: str, entry_low: float, entry_high: float, tp1: float, atr: float) -> float:
+    """Measure clean distance from the realistic entry edge to TP1 in ATR units."""
+    if atr <= 0:
+        return 0.0
+    if side == "buy":
+        return max((tp1 - entry_high) / atr, 0.0)
+    if side == "sell":
+        return max((entry_low - tp1) / atr, 0.0)
+    return 0.0
+
+
+def _tp1_too_close(distance_atr: float, settings: dict) -> bool:
+    return distance_atr < float(settings.get("min_tp1_atr_distance", 0.9))
+
+
 def build_trade_plan(action: str, market, settings: dict) -> dict:
     price = float(market.price)
     atr = float(market.atr)
-    stop_mult = float(settings.get("atr_stop_multiplier", settings.get("atr_multiplier", 1.3)))
-    tp_mult = float(settings.get("atr_tp_multiplier", 2.0))
-    tp1_r = float(settings.get("tp1_r", 1.5))
-    tp2_r = float(settings.get("tp2_r", 2.0))
+    stop_mult = float(settings.get("atr_stop_multiplier", settings.get("atr_multiplier", 1.6)))
+    min_tp1_distance = float(settings.get("min_tp1_atr_distance", 0.9))
 
     if action == "BUY PLAN":
         stop = min(float(market.swing_low), price - stop_mult * atr)
         risk = max(price - stop, 0.01)
-        tp1 = price + min(tp_mult, tp1_r * stop_mult) * atr
-        tp2 = price + max(tp_mult, tp2_r * stop_mult) * atr
+        buy_tp1_mult = float(settings.get("buy_tp1_atr_multiplier", 1.2))
+        buy_tp2_mult = float(settings.get("buy_tp2_atr_multiplier", 2.0))
+        entry_low = price - 0.20 * atr
+        entry_high = price + 0.10 * atr
+        tp1 = price + buy_tp1_mult * atr
+        tp2 = price + max(buy_tp2_mult, buy_tp1_mult + 0.50) * atr
+        tp1_distance_atr = _tp1_distance_atr("buy", entry_low, entry_high, tp1, atr)
+        tp1_too_close = _tp1_too_close(tp1_distance_atr, settings)
         return {
             "side": "buy_advisory",
-            "entry_zone_low": price - 0.20 * atr,
-            "entry_zone_high": price + 0.10 * atr,
+            "entry_zone_low": entry_low,
+            "entry_zone_high": entry_high,
             "stop": stop,
             "tp1": tp1,
             "tp2": tp2,
             "risk": risk,
-            "note": "Active bullish advisory plan.",
+            "tp1_distance_atr": tp1_distance_atr,
+            "tp1_too_close": tp1_too_close,
+            "min_tp1_atr_distance": min_tp1_distance,
+            "note": "Active bullish advisory plan. BUY TP uses dedicated ATR targets.",
         }
 
     if action == "SELL PLAN" and bool(settings.get("short_plans_enabled", False)):
         stop = max(float(market.swing_high), price + stop_mult * atr)
         risk = max(stop - price, 0.01)
 
-        # Short targets are intentionally tighter than the old generic ATR target.
-        # The old formula used 4.5 ATR for TP1 and 6.0 ATR for TP2 with default settings,
-        # which was too far for XAU/USD scalp-style bearish plans.
-        sell_tp1_mult = float(settings.get("sell_tp1_atr_multiplier", 1.25))
-        sell_tp2_mult = float(settings.get("sell_tp2_atr_multiplier", 2.25))
+        sell_tp1_mult = float(settings.get("sell_tp1_atr_multiplier", 1.2))
+        sell_tp2_mult = float(settings.get("sell_tp2_atr_multiplier", 2.0))
         support_buffer = float(settings.get("sell_support_buffer_atr", 0.15))
 
+        entry_low = price - 0.10 * atr
+        entry_high = price + 0.20 * atr
         tp1_raw = price - sell_tp1_mult * atr
         tp2_raw = price - sell_tp2_mult * atr
         tp1 = _sell_target_before_support(price, tp1_raw, float(market.swing_low), atr, support_buffer)
         tp2 = _sell_target_before_support(price, tp2_raw, float(market.support), atr, support_buffer)
         tp1 = _floor_below_price(price, tp1, 0.50 * atr)
         tp2 = min(_floor_below_price(price, tp2, 1.00 * atr), tp1 - 0.50 * atr)
+        tp1_distance_atr = _tp1_distance_atr("sell", entry_low, entry_high, tp1, atr)
+        tp1_too_close = _tp1_too_close(tp1_distance_atr, settings)
 
         return {
             "side": "sell_advisory",
-            "entry_zone_low": price - 0.10 * atr,
-            "entry_zone_high": price + 0.20 * atr,
+            "entry_zone_low": entry_low,
+            "entry_zone_high": entry_high,
             "stop": stop,
             "tp1": tp1,
             "tp2": tp2,
             "risk": risk,
+            "tp1_distance_atr": tp1_distance_atr,
+            "tp1_too_close": tp1_too_close,
+            "min_tp1_atr_distance": min_tp1_distance,
             "note": "Active bearish advisory plan. SELL TP uses reachable ATR/support-aware targets.",
         }
 
@@ -77,6 +103,9 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
             "tp1": None,
             "tp2": None,
             "risk": 0.0,
+            "tp1_distance_atr": 0.0,
+            "tp1_too_close": False,
+            "min_tp1_atr_distance": min_tp1_distance,
             "note": "Bearish conditions detected. This is not a short entry unless short plans are enabled.",
         }
 
@@ -88,6 +117,9 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
         "tp1": None,
         "tp2": None,
         "risk": 0.0,
+        "tp1_distance_atr": 0.0,
+        "tp1_too_close": False,
+        "min_tp1_atr_distance": min_tp1_distance,
         "note": "No active trade plan. Wait for a clean actionable signal.",
     }
 
