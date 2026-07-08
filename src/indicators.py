@@ -72,6 +72,13 @@ def momentum_value(df: pd.DataFrame, length: int) -> pd.Series:
     return momentum_source.rolling(length, min_periods=length).apply(_linear_regression_last_value, raw=True)
 
 
+def _bars_since_true(mask: pd.Series) -> pd.Series:
+    """Return number of bars since the last True value; NaN if no True has occurred."""
+    bar_number = pd.Series(np.arange(len(mask)), index=mask.index, dtype=float)
+    last_true_bar = bar_number.where(mask.fillna(False).astype(bool)).ffill()
+    return bar_number - last_true_bar
+
+
 def add_indicators(bars: pd.DataFrame, settings: dict) -> pd.DataFrame:
     df = bars.copy()
     if df.empty:
@@ -86,6 +93,8 @@ def add_indicators(bars: pd.DataFrame, settings: dict) -> pd.DataFrame:
     kc_length = _to_int(settings, "kc_length", 20)
     kc_mult = _to_float(settings, "kc_mult", 1.5)
     rv_length = _to_int(settings, "realized_vol_length", 100)
+    release_recent_bars = _to_int(settings, "kc_release_recent_bars", 3)
+    chase_atr_limit = _to_float(settings, "kc_release_chase_atr_limit", 1.0)
 
     df["ema_fast"] = df["close"].ewm(span=ema_fast, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=ema_slow, adjust=False).mean()
@@ -115,12 +124,50 @@ def add_indicators(bars: pd.DataFrame, settings: dict) -> pd.DataFrame:
 
     df["bb_lower"], df["bb_middle"], df["bb_upper"] = bollinger_bands(df["close"], bb_length, bb_mult)
     df["kc_lower"], df["kc_middle"], df["kc_upper"] = keltner_channels(df, kc_length, kc_mult)
+
+    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]).abs()
+    df["kc_width"] = (df["kc_upper"] - df["kc_lower"]).abs()
+    df["compression_ratio"] = df["bb_width"] / df["kc_width"].replace(0, np.nan)
+
     df["squeeze_on"] = (df["bb_lower"] >= df["kc_lower"]) & (df["bb_upper"] <= df["kc_upper"])
     df["squeeze_fired"] = df["squeeze_on"].shift(1).fillna(False).astype(bool) & (~df["squeeze_on"].fillna(False).astype(bool))
+
+    df["bars_since_squeeze_release"] = _bars_since_true(df["squeeze_fired"])
+    df["squeeze_recent"] = (
+        df["bars_since_squeeze_release"].notna()
+        & (df["bars_since_squeeze_release"] >= 0)
+        & (df["bars_since_squeeze_release"] <= release_recent_bars)
+    )
+
+    df["release_close"] = df["close"].where(df["squeeze_fired"]).ffill()
+    df["release_high"] = df["high"].where(df["squeeze_fired"]).ffill()
+    df["release_low"] = df["low"].where(df["squeeze_fired"]).ffill()
+    df["release_chase_atr"] = ((df["close"] - df["release_close"]).abs() / df["atr"].replace(0, np.nan)).where(df["squeeze_recent"])
+    df["release_chase_risk"] = df["squeeze_recent"] & (df["release_chase_atr"] > chase_atr_limit)
+
     df["kc_momentum"] = momentum_value(df, kc_length)
     df["kc_momentum_prev"] = df["kc_momentum"].shift(1)
     df["kc_momentum_rising"] = df["kc_momentum"] > df["kc_momentum_prev"]
     df["kc_momentum_falling"] = df["kc_momentum"] < df["kc_momentum_prev"]
+
+    df["release_bullish_confirmed"] = (
+        df["squeeze_recent"]
+        & (df["close"] > df["release_high"])
+        & (df["kc_momentum"] > 0)
+        & (df["kc_momentum"] >= df["kc_momentum_prev"])
+    )
+    df["release_bearish_confirmed"] = (
+        df["squeeze_recent"]
+        & (df["close"] < df["release_low"])
+        & (df["kc_momentum"] < 0)
+        & (df["kc_momentum"] <= df["kc_momentum_prev"])
+    )
+
+    df["release_direction"] = "none"
+    df.loc[df["squeeze_recent"] & ~(df["release_bullish_confirmed"] | df["release_bearish_confirmed"]), "release_direction"] = "unconfirmed"
+    df.loc[df["release_bullish_confirmed"], "release_direction"] = "bullish"
+    df.loc[df["release_bearish_confirmed"], "release_direction"] = "bearish"
+
     df["realized_vol"] = realized_volatility(df["close"], rv_length)
 
     return df
