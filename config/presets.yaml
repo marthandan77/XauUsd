@@ -13,6 +13,8 @@ Conservative:
   middle_range_upper_pct: 70
   entry_chase_atr_fraction: 0.25
   short_plans_enabled: false
+  kc_release_recent_bars: 2
+  kc_release_chase_atr_limit: 0.8
   kc_breakout_score: 25
 Balanced Strict:
   preset_name: Balanced Strict
@@ -29,6 +31,8 @@ Balanced Strict:
   middle_range_upper_pct: 65
   entry_chase_atr_fraction: 0.35
   short_plans_enabled: false
+  kc_release_recent_bars: 3
+  kc_release_chase_atr_limit: 1.0
   kc_breakout_score: 25
 Aggressive:
   preset_name: Aggressive
@@ -45,4 +49,6 @@ Aggressive:
   middle_range_upper_pct: 60
   entry_chase_atr_fraction: 0.50
   short_plans_enabled: false
+  kc_release_recent_bars: 4
+  kc_release_chase_atr_limit: 1.2
   kc_breakout_score: 30
