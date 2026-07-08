@@ -12,6 +12,8 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
     bull = 0
     bear = 0
     notes: list[str] = []
+    force_wait = False
+    wait_reason = ""
 
     if macro.get("bias") in {"supportive", "mixed"}:
         bull += 20
@@ -21,15 +23,27 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
         bull += 10
         bear += 10
 
-    if regime in {"bull_trend", "bullish_squeeze_breakout"}:
+    if regime in {"bull_trend", "bullish_release_confirmed"}:
         bull += 25
-    elif regime in {"bear_trend", "bearish_squeeze_breakout"}:
+    elif regime in {"bear_trend", "bearish_release_confirmed"}:
         bear += 25
     elif regime == "range":
         bull += 8 if market.near_support else 0
         bear += 8 if market.near_resistance else 0
     elif regime == "compression":
-        notes.append("KC squeeze compression is active; wait for release direction.")
+        force_wait = True
+        wait_reason = "KC squeeze compression is active; wait for release direction."
+        notes.append(wait_reason)
+    elif regime in {"squeeze_release_now", "squeeze_release_recent"}:
+        force_wait = True
+        wait_reason = "KC release is active but direction is not confirmed."
+        notes.append(wait_reason)
+    elif regime in {"bullish_release_overextended", "bearish_release_overextended"}:
+        force_wait = True
+        wait_reason = "KC release is confirmed but overextended; do not chase."
+        notes.append(wait_reason)
+    elif regime == "squeeze_release_expired":
+        notes.append("Previous KC release window has expired; ignore old release.")
 
     if market.near_support:
         bull += 20
@@ -62,22 +76,44 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
         current_momentum = _as_float(row.get("kc_momentum"))
         previous_momentum = _as_float(row.get("kc_momentum_prev"))
         trend_sma = _as_float(row.get("trend_sma"), close)
-        squeeze_fired = bool(row.get("squeeze_fired", False))
         squeeze_on = bool(row.get("squeeze_on", False))
+        squeeze_fired = bool(row.get("squeeze_fired", False))
+        squeeze_recent = bool(row.get("squeeze_recent", False))
+        bullish_confirmed = bool(row.get("release_bullish_confirmed", False))
+        bearish_confirmed = bool(row.get("release_bearish_confirmed", False))
+        release_chase_risk = bool(row.get("release_chase_risk", False))
 
-        if squeeze_fired and current_momentum > 0 and current_momentum > previous_momentum and close > trend_sma:
-            bull += int(settings.get("kc_breakout_score", 25))
-            kc_state = "bullish_squeeze_breakout"
-            notes.append("KC squeeze fired upward with rising positive momentum.")
-        elif squeeze_fired and current_momentum < 0 and current_momentum < previous_momentum and close < trend_sma:
-            bear += int(settings.get("kc_breakout_score", 25))
-            kc_state = "bearish_squeeze_breakout"
-            notes.append("KC squeeze fired downward with falling negative momentum.")
-        elif squeeze_on:
-            bull += int(settings.get("kc_compression_score", 3))
-            bear += int(settings.get("kc_compression_score", 3))
+        if squeeze_on or kc_state == "compression":
             kc_state = "compression"
+            force_wait = True
+            wait_reason = wait_reason or "KC compression detected; signal needs breakout confirmation."
             notes.append("KC compression detected; signal needs breakout confirmation.")
+        elif release_chase_risk or kc_state in {"bullish_release_overextended", "bearish_release_overextended"}:
+            force_wait = True
+            wait_reason = wait_reason or "KC release is overextended; do not chase."
+            notes.append("KC release is overextended; do not chase.")
+        elif squeeze_recent and bullish_confirmed:
+            bull += int(settings.get("kc_breakout_score", 25))
+            kc_state = "bullish_release_confirmed"
+            notes.append("KC release confirmed bullish: price broke release high with positive/rising momentum.")
+            if close <= trend_sma:
+                notes.append("Bullish release is lower quality because price is not above the trend SMA.")
+        elif squeeze_recent and bearish_confirmed:
+            bear += int(settings.get("kc_breakout_score", 25))
+            kc_state = "bearish_release_confirmed"
+            notes.append("KC release confirmed bearish: price broke release low with negative/falling momentum.")
+            if close >= trend_sma:
+                notes.append("Bearish release is lower quality because price is not below the trend SMA.")
+        elif squeeze_fired:
+            kc_state = "release_fired_now"
+            force_wait = True
+            wait_reason = wait_reason or "KC release fired on this candle; wait for directional confirmation."
+            notes.append("KC release fired on this candle; wait for directional confirmation.")
+        elif squeeze_recent:
+            kc_state = "release_recent_unconfirmed"
+            force_wait = True
+            wait_reason = wait_reason or "KC release is recent but unconfirmed."
+            notes.append("KC release is recent but unconfirmed.")
         elif current_momentum > 0 and close > trend_sma:
             bull += int(settings.get("kc_momentum_score", 10))
             kc_state = "bullish_momentum"
@@ -90,6 +126,11 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
 
     bull += 5
     bear += 5
+
+    if bool(settings.get("signals_disabled", False)):
+        force_wait = False
+        wait_reason = str(settings.get("signals_disabled_reason", "Signals disabled."))
+        notes.append(wait_reason)
 
     if bull > bear:
         bias = "bullish"
@@ -108,11 +149,19 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
         "confidence": int(min(max(confidence, 0), 100)),
         "kc_state": kc_state,
         "kc_reason": kc_reason,
+        "force_wait": bool(force_wait),
+        "wait_reason": wait_reason,
         "notes": notes,
     }
 
 
 def choose_action(scores: dict, settings: dict) -> str:
+    if bool(settings.get("signals_disabled", False)):
+        return "HOLD"
+
+    if bool(scores.get("force_wait", False)):
+        return "WAIT"
+
     bull = scores["bull_score"]
     bear = scores["bear_score"]
     long_enabled = bool(settings.get("long_plans_enabled", True))
