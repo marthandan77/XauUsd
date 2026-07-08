@@ -1,19 +1,48 @@
 from __future__ import annotations
 
+import math
+
 from .trade_plan import room_ratio
 
 
 ACTIONABLE_PLANS = {"BUY PLAN", "SELL PLAN"}
+UNCONFIRMED_RELEASE_REGIMES = {"compression", "squeeze_release_now", "squeeze_release_recent"}
+OVEREXTENDED_RELEASE_REGIMES = {"bullish_release_overextended", "bearish_release_overextended"}
 
 
-def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settings: dict) -> dict:
+def _finite_float(value, default: float | None = None):
+    try:
+        number = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(number):
+        return default
+    return number
+
+
+def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settings: dict, row: dict | None = None) -> dict:
     reasons: list[str] = []
+    row = row or {}
+
+    if bool(settings.get("signals_disabled", False)) and action in ACTIONABLE_PLANS:
+        reasons.append(str(settings.get("signals_disabled_reason", "signals disabled")))
     if macro.get("blocked"):
         reasons.append("event block active")
     if regime == "shock":
         reasons.append("shock regime")
     if regime == "compression" and action in ACTIONABLE_PLANS:
         reasons.append("squeeze still compressed; wait for release")
+    if regime in UNCONFIRMED_RELEASE_REGIMES and action in ACTIONABLE_PLANS:
+        reasons.append("KC release direction unconfirmed")
+    if regime in OVEREXTENDED_RELEASE_REGIMES and action in ACTIONABLE_PLANS:
+        reasons.append("KC release overextended; do not chase")
+
+    release_chase_atr = _finite_float(row.get("release_chase_atr"))
+    if action in ACTIONABLE_PLANS and release_chase_atr is not None:
+        chase_limit = float(settings.get("kc_release_chase_atr_limit", 1.0))
+        if release_chase_atr > chase_limit:
+            reasons.append(f"KC release chase risk above limit: {release_chase_atr:.2f} ATR > {chase_limit:.2f} ATR")
+
     if market.middle_range and action in ACTIONABLE_PLANS:
         reasons.append("middle of range")
     if action == "BUY PLAN" and market.near_resistance:
