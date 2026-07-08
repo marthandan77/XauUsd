@@ -43,6 +43,11 @@ def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settin
         if release_chase_atr > chase_limit:
             reasons.append(f"KC release chase risk above limit: {release_chase_atr:.2f} ATR > {chase_limit:.2f} ATR")
 
+    if action in ACTIONABLE_PLANS and bool(plan.get("tp1_too_close", False)):
+        tp1_distance = _finite_float(plan.get("tp1_distance_atr"), 0.0)
+        min_tp1_distance = float(settings.get("min_tp1_atr_distance", 0.9))
+        reasons.append(f"TP1 too close to entry: {tp1_distance:.2f} ATR < {min_tp1_distance:.2f} ATR minimum")
+
     if market.middle_range and action in ACTIONABLE_PLANS:
         reasons.append("middle of range")
     if action == "BUY PLAN" and market.near_resistance:
@@ -53,7 +58,7 @@ def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settin
         reasons.append("short plans disabled")
 
     rr = room_ratio(action, plan, market)
-    if action in ACTIONABLE_PLANS and rr < float(settings.get("min_reward_risk", 1.5)):
+    if action in ACTIONABLE_PLANS and rr < float(settings.get("min_reward_risk", 1.2)):
         reasons.append("not enough room to target")
 
     risk = float(plan.get("risk", 0) or 0)
