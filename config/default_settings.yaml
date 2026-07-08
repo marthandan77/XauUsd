@@ -45,6 +45,8 @@ bb_length: 20
 bb_mult: 2.0
 kc_length: 20
 kc_mult: 1.5
+kc_release_recent_bars: 3
+kc_release_chase_atr_limit: 1.0
 kc_breakout_score: 25
 kc_momentum_score: 10
 kc_compression_score: 3
