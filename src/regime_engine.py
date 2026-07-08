@@ -19,16 +19,21 @@ def classify_regime(df: pd.DataFrame, market: MarketMap, settings: dict) -> str:
     if bool(settings.get("kc_squeeze_enabled", True)):
         squeeze_on = bool(row.get("squeeze_on", False))
         squeeze_fired = bool(row.get("squeeze_fired", False))
-        momentum = float(row.get("kc_momentum", 0) or 0)
-        previous_momentum = float(row.get("kc_momentum_prev", 0) or 0)
-        trend_sma = float(row.get("trend_sma", ema_slow) or ema_slow)
+        squeeze_recent = bool(row.get("squeeze_recent", False))
+        bullish_confirmed = bool(row.get("release_bullish_confirmed", False))
+        bearish_confirmed = bool(row.get("release_bearish_confirmed", False))
+        release_chase_risk = bool(row.get("release_chase_risk", False))
 
-        if squeeze_fired and momentum > 0 and momentum > previous_momentum and price > trend_sma:
-            return "bullish_squeeze_breakout"
-        if squeeze_fired and momentum < 0 and momentum < previous_momentum and price < trend_sma:
-            return "bearish_squeeze_breakout"
         if squeeze_on:
             return "compression"
+        if squeeze_recent and bullish_confirmed:
+            return "bullish_release_overextended" if release_chase_risk else "bullish_release_confirmed"
+        if squeeze_recent and bearish_confirmed:
+            return "bearish_release_overextended" if release_chase_risk else "bearish_release_confirmed"
+        if squeeze_fired:
+            return "squeeze_release_now"
+        if squeeze_recent:
+            return "squeeze_release_recent"
 
     if ema_fast > ema_slow and price > ema_fast and adx >= adx_min:
         return "bull_trend"
