@@ -73,6 +73,18 @@ def fmt_units(value) -> str:
     return f"{value:,.2f}"
 
 
+def fmt_number(value, digits: int = 2) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except Exception:
+        return "N/A"
+    if not math.isfinite(value):
+        return "N/A"
+    return f"{value:.{digits}f}"
+
+
 def has_plan_levels(plan: dict) -> bool:
     return plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None
 
@@ -85,10 +97,16 @@ def plan_value(plan: dict, key: str):
 
 def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
     """Build non-executable candidate levels when the forecast is useful but official action is blocked/waiting."""
+    if bool(settings.get("signals_disabled", False)):
+        return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "Signals disabled until real data is active."}, ""
+
     threshold = int(settings.get("forecast_threshold", 65))
     bias = str(scores.get("bias", "mixed"))
     bull_score = int(scores.get("bull_score", 0))
     bear_score = int(scores.get("bear_score", 0))
+
+    if bool(scores.get("force_wait", False)):
+        return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": scores.get("wait_reason", "Waiting for confirmation.")}, ""
 
     if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
         plan = build_trade_plan("BUY PLAN", market, settings)
@@ -148,6 +166,8 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["bb_mult"] = st.sidebar.slider("BB multiplier", 1.0, 3.5, float(settings.get("bb_mult", 2.0)), 0.1)
     settings["kc_length"] = st.sidebar.slider("KC length", 10, 60, int(settings.get("kc_length", 20)))
     settings["kc_mult"] = st.sidebar.slider("KC multiplier", 1.0, 3.5, float(settings.get("kc_mult", 1.5)), 0.1)
+    settings["kc_release_recent_bars"] = st.sidebar.slider("KC release memory bars", 1, 8, int(settings.get("kc_release_recent_bars", 3)))
+    settings["kc_release_chase_atr_limit"] = st.sidebar.slider("KC chase limit ATR", 0.5, 3.0, float(settings.get("kc_release_chase_atr_limit", 1.0)), 0.1)
     settings["trend_length"] = st.sidebar.slider("Trend SMA length", 50, 300, int(settings.get("trend_length", 200)))
     settings["atr_period"] = st.sidebar.slider("ATR period", 5, 50, int(settings.get("atr_period", 14)))
     settings["atr_stop_multiplier"] = st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1)
@@ -219,6 +239,17 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
         for column, label in [("kc_upper", "KC Upper"), ("kc_lower", "KC Lower")]:
             if column in chart_df:
                 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df[column], mode="lines", name=label))
+    if "squeeze_fired" in chart_df:
+        release_df = chart_df[chart_df["squeeze_fired"].fillna(False).astype(bool)]
+        if not release_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=release_df.index,
+                    y=release_df["close"],
+                    mode="markers",
+                    name="KC Release",
+                )
+            )
     if action in ACTIONABLE and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None:
         marker_price = (float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0
         fig.add_trace(
@@ -242,10 +273,13 @@ refresh_panel()
 macro_bias = st.sidebar.selectbox("Macro bias", ["mixed", "supportive", "restrictive"], index=0)
 feed = load_bars(settings)
 
+settings["signals_disabled"] = feed.source == "sample"
+settings["signals_disabled_reason"] = "Sample data source; KC trade signals are disabled until live API or uploaded real CSV is active."
+
 bars_raw = add_indicators(feed.bars, settings)
 bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
 if bars.empty:
-    st.error("Not enough clean OHLC data after indicator warm-up. Increase lookback period or use sample data.")
+    st.error("Not enough clean OHLC data after indicator warm-up. Increase lookback period or use real CSV data.")
     st.stop()
 
 kc = kc_squeeze_summary(bars, settings)
@@ -264,7 +298,7 @@ action = choose_action(scores, settings)
 plan = build_trade_plan(action, market, settings)
 candidate_action, candidate_plan, candidate_note = candidate_plan_from_scores(scores, market, settings)
 bands = price_bands(market, regime)
-veto = apply_veto(action, plan, market, regime, macro, settings)
+veto = apply_veto(action, plan, market, regime, macro, settings, latest_row)
 summary = explain(regime, scores, veto, market, macro)
 active_plan = veto["final_action"] in ACTIONABLE
 status = plan_status(action, veto["final_action"], plan, candidate_action, candidate_note)
@@ -290,6 +324,8 @@ source_cols[2].metric("Rows loaded", f"{len(feed.bars):,}")
 source_cols[3].metric("Rows after warm-up", f"{len(bars):,}")
 if feed.warning:
     st.warning(feed.warning)
+if bool(settings.get("signals_disabled", False)):
+    st.error(settings["signals_disabled_reason"])
 
 if page == "Forecast Manager":
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -304,6 +340,8 @@ if page == "Forecast Manager":
     s3.metric("Range position", f"{market.range_position_pct:.1f}%")
     s4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
     st.info(summary)
+    if scores.get("force_wait") and scores.get("wait_reason"):
+        st.warning(scores["wait_reason"])
     st.caption(plan.get("note", ""))
     if candidate_note and (not has_plan_levels(plan) or veto["final_action"] not in ACTIONABLE):
         st.warning(candidate_note)
@@ -324,8 +362,32 @@ if page == "Forecast Manager":
 
 elif page == "KC Squeeze":
     st.subheader("KC Squeeze module")
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("KC state", kc["state"])
+    k2.metric("Direction", kc.get("release_direction", "none"))
+    k3.metric("Squeeze on", str(kc.get("squeeze_on", False)))
+    k4.metric("Release now", str(kc.get("squeeze_fired", False)))
+    k5.metric("Bars since release", fmt_number(kc.get("bars_since_squeeze_release"), 0))
+    k6.metric("Chase ATR", fmt_number(kc.get("release_chase_atr"), 2))
     st.json(kc)
-    cols = ["close", "trend_sma", "bb_upper", "bb_lower", "kc_upper", "kc_lower", "squeeze_on", "squeeze_fired", "kc_momentum"]
+    cols = [
+        "close",
+        "trend_sma",
+        "bb_upper",
+        "bb_lower",
+        "kc_upper",
+        "kc_lower",
+        "compression_ratio",
+        "squeeze_on",
+        "squeeze_fired",
+        "squeeze_recent",
+        "bars_since_squeeze_release",
+        "release_direction",
+        "release_chase_atr",
+        "release_bullish_confirmed",
+        "release_bearish_confirmed",
+        "kc_momentum",
+    ]
     st.dataframe(bars[[c for c in cols if c in bars.columns]].tail(30), use_container_width=True)
     st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
@@ -350,9 +412,16 @@ elif page == "Log Snapshot":
     row = {
         "source": feed.source,
         "warning": feed.warning,
+        "signals_disabled": settings.get("signals_disabled", False),
         "price": market.price,
         "regime": regime,
         "kc_state": kc["state"],
+        "kc_direction": kc.get("release_direction"),
+        "squeeze_on": kc.get("squeeze_on"),
+        "squeeze_fired": kc.get("squeeze_fired"),
+        "squeeze_recent": kc.get("squeeze_recent"),
+        "bars_since_squeeze_release": kc.get("bars_since_squeeze_release"),
+        "release_chase_atr": kc.get("release_chase_atr"),
         "bias": scores["bias"],
         "confidence": scores["confidence"],
         "raw_action": action,
