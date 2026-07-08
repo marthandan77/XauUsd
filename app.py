@@ -22,6 +22,36 @@ from src.veto_engine import apply_veto
 
 ROOT = Path(__file__).resolve().parent
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
+CONTROL_PREFIX = "control_"
+PERSISTED_SETTING_KEYS = [
+    "price_interval",
+    "price_period",
+    "buy_threshold",
+    "sell_threshold",
+    "wait_threshold",
+    "atr_multiplier",
+    "min_reward_risk",
+    "middle_range_lower_pct",
+    "middle_range_upper_pct",
+    "kc_squeeze_enabled",
+    "bb_length",
+    "bb_mult",
+    "kc_length",
+    "kc_mult",
+    "kc_release_recent_bars",
+    "kc_release_chase_atr_limit",
+    "trend_length",
+    "atr_period",
+    "atr_stop_multiplier",
+    "atr_tp_multiplier",
+    "sell_tp1_atr_multiplier",
+    "sell_tp2_atr_multiplier",
+    "sell_support_buffer_atr",
+    "risk_per_trade_pct",
+    "show_bollinger_bands",
+    "show_keltner_channels",
+    "news_block_manual",
+]
 
 st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
 
@@ -40,6 +70,106 @@ def _sample_freq(settings: dict) -> str:
     return {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
         str(settings.get("price_interval", "15m")), "15min"
     )
+
+
+def _control_key(key: str) -> str:
+    return f"{CONTROL_PREFIX}{key}"
+
+
+def _query_params_as_dict() -> dict[str, str]:
+    try:
+        return {key: value for key, value in st.query_params.items()}
+    except Exception:
+        try:
+            raw = st.experimental_get_query_params()
+            return {key: values[0] for key, values in raw.items() if values}
+        except Exception:
+            return {}
+
+
+def _coerce_query_value(raw_value, current_value):
+    if isinstance(raw_value, list):
+        raw_value = raw_value[0] if raw_value else None
+    if raw_value is None:
+        return current_value
+    if isinstance(current_value, bool):
+        return str(raw_value).strip().lower() in {"1", "true", "yes", "y", "on"}
+    if isinstance(current_value, int) and not isinstance(current_value, bool):
+        try:
+            return int(float(str(raw_value)))
+        except Exception:
+            return current_value
+    if isinstance(current_value, float):
+        try:
+            return float(str(raw_value))
+        except Exception:
+            return current_value
+    return str(raw_value)
+
+
+def apply_query_settings(settings: dict) -> dict:
+    updated = dict(settings)
+    params = _query_params_as_dict()
+    for key in PERSISTED_SETTING_KEYS:
+        if key in updated and key in params:
+            updated[key] = _coerce_query_value(params[key], updated[key])
+    return updated
+
+
+def _query_serialized_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def persist_query_settings(settings: dict) -> None:
+    params = {key: _query_serialized_value(settings[key]) for key in PERSISTED_SETTING_KEYS if key in settings}
+    try:
+        st.query_params.clear()
+        for key, value in params.items():
+            st.query_params[key] = value
+    except Exception:
+        try:
+            st.experimental_set_query_params(**params)
+        except Exception:
+            pass
+
+
+def clear_query_settings() -> None:
+    try:
+        st.query_params.clear()
+    except Exception:
+        try:
+            st.experimental_set_query_params()
+        except Exception:
+            pass
+
+
+def initialize_control_state(settings: dict) -> None:
+    for key in PERSISTED_SETTING_KEYS:
+        if key in settings and _control_key(key) not in st.session_state:
+            st.session_state[_control_key(key)] = settings[key]
+
+
+def clear_control_state() -> None:
+    for key in list(st.session_state.keys()):
+        if str(key).startswith(CONTROL_PREFIX):
+            del st.session_state[key]
+
+
+def staged_settings(settings: dict) -> dict:
+    staged = dict(settings)
+    for key in PERSISTED_SETTING_KEYS:
+        control_key = _control_key(key)
+        if control_key in st.session_state:
+            staged[key] = st.session_state[control_key]
+    return staged
+
+
+def stage_preset_values(preset: dict) -> None:
+    for key, value in preset.items():
+        if key in PERSISTED_SETTING_KEYS:
+            st.session_state[_control_key(key)] = value
 
 
 def refresh_panel() -> None:
@@ -137,57 +267,75 @@ def plan_status(action: str, final_action: str, plan: dict, candidate_action: st
 
 
 def settings_panel(settings: dict, presets: dict) -> dict:
+    initialize_control_state(settings)
+
+    left_col, right_col = st.sidebar.columns(2)
+    reset_clicked = left_col.button("Reset", key="settings_reset_button", use_container_width=True)
+    apply_clicked = right_col.button("Apply", key="settings_apply_button", type="primary", use_container_width=True)
+
+    if reset_clicked:
+        clear_query_settings()
+        clear_control_state()
+        st.rerun()
+
+    st.sidebar.caption("Change controls first, then press Apply. Applied controls are saved in the URL and survive page refresh.")
     st.sidebar.header("Forecast controls")
+
     if presets:
-        selected = st.sidebar.selectbox("Preset", list(presets.keys()), index=0)
-        if st.sidebar.button("Load preset"):
-            settings.update(presets[selected])
+        selected = st.sidebar.selectbox("Preset", list(presets.keys()), index=0, key="preset_selector")
+        if st.sidebar.button("Stage preset", key="stage_preset_button"):
+            stage_preset_values(presets[selected])
+            st.rerun()
 
     interval_options = ["5m", "15m", "30m", "1h", "4h", "1d"]
+    if st.session_state.get(_control_key("price_interval")) not in interval_options:
+        st.session_state[_control_key("price_interval")] = str(settings.get("price_interval", "15m"))
     period_options = ["7d", "30d", "60d", "6mo", "1y", "2y"]
-    settings["price_interval"] = st.sidebar.selectbox(
-        "Timeframe", interval_options, index=_select_index(interval_options, str(settings.get("price_interval", "15m")))
-    )
-    settings["price_period"] = st.sidebar.selectbox(
-        "Lookback period", period_options, index=_select_index(period_options, str(settings.get("price_period", "30d")))
-    )
+    if st.session_state.get(_control_key("price_period")) not in period_options:
+        st.session_state[_control_key("price_period")] = str(settings.get("price_period", "30d"))
 
-    settings["buy_threshold"] = st.sidebar.slider("Bull threshold", 50, 95, int(settings.get("buy_threshold", 78)))
-    settings["sell_threshold"] = st.sidebar.slider("Bear threshold", 50, 95, int(settings.get("sell_threshold", 78)))
-    settings["wait_threshold"] = st.sidebar.slider("Watch threshold", 40, 90, int(settings.get("wait_threshold", 60)))
-    settings["atr_multiplier"] = st.sidebar.slider("ATR guard multiplier", 0.8, 2.5, float(settings.get("atr_multiplier", 1.3)), 0.1)
-    settings["min_reward_risk"] = st.sidebar.slider("Minimum room ratio", 1.0, 3.0, float(settings.get("min_reward_risk", 1.5)), 0.1)
-    settings["middle_range_lower_pct"] = st.sidebar.slider("Middle zone lower %", 10, 49, int(settings.get("middle_range_lower_pct", 35)))
-    settings["middle_range_upper_pct"] = st.sidebar.slider("Middle zone upper %", 51, 90, int(settings.get("middle_range_upper_pct", 65)))
+    st.sidebar.selectbox("Timeframe", interval_options, key=_control_key("price_interval"))
+    st.sidebar.selectbox("Lookback period", period_options, key=_control_key("price_period"))
+
+    st.sidebar.slider("Bull threshold", 50, 95, key=_control_key("buy_threshold"))
+    st.sidebar.slider("Bear threshold", 50, 95, key=_control_key("sell_threshold"))
+    st.sidebar.slider("Watch threshold", 40, 90, key=_control_key("wait_threshold"))
+    st.sidebar.slider("ATR guard multiplier", 0.8, 2.5, step=0.1, key=_control_key("atr_multiplier"))
+    st.sidebar.slider("Minimum room ratio", 1.0, 3.0, step=0.1, key=_control_key("min_reward_risk"))
+    st.sidebar.slider("Middle zone lower %", 10, 49, key=_control_key("middle_range_lower_pct"))
+    st.sidebar.slider("Middle zone upper %", 51, 90, key=_control_key("middle_range_upper_pct"))
 
     st.sidebar.header("KC Squeeze")
-    settings["kc_squeeze_enabled"] = st.sidebar.toggle("Enable KC Squeeze module", bool(settings.get("kc_squeeze_enabled", True)))
-    settings["bb_length"] = st.sidebar.slider("BB length", 10, 60, int(settings.get("bb_length", 20)))
-    settings["bb_mult"] = st.sidebar.slider("BB multiplier", 1.0, 3.5, float(settings.get("bb_mult", 2.0)), 0.1)
-    settings["kc_length"] = st.sidebar.slider("KC length", 10, 60, int(settings.get("kc_length", 20)))
-    settings["kc_mult"] = st.sidebar.slider("KC multiplier", 1.0, 3.5, float(settings.get("kc_mult", 1.5)), 0.1)
-    settings["kc_release_recent_bars"] = st.sidebar.slider("KC release memory bars", 1, 8, int(settings.get("kc_release_recent_bars", 3)))
-    settings["kc_release_chase_atr_limit"] = st.sidebar.slider("KC chase limit ATR", 0.5, 3.0, float(settings.get("kc_release_chase_atr_limit", 1.0)), 0.1)
-    settings["trend_length"] = st.sidebar.slider("Trend SMA length", 50, 300, int(settings.get("trend_length", 200)))
-    settings["atr_period"] = st.sidebar.slider("ATR period", 5, 50, int(settings.get("atr_period", 14)))
-    settings["atr_stop_multiplier"] = st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1)
-    settings["atr_tp_multiplier"] = st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1)
-    settings["sell_tp1_atr_multiplier"] = st.sidebar.slider(
-        "Sell Take Profit 1 ATR", 0.50, 3.00, float(settings.get("sell_tp1_atr_multiplier", 1.25)), 0.05
-    )
-    settings["sell_tp2_atr_multiplier"] = st.sidebar.slider(
-        "Sell Take Profit 2 ATR", 0.75, 5.00, float(settings.get("sell_tp2_atr_multiplier", 2.25)), 0.05
-    )
-    settings["sell_support_buffer_atr"] = st.sidebar.slider(
-        "Sell support buffer ATR", 0.00, 1.00, float(settings.get("sell_support_buffer_atr", 0.15)), 0.05
-    )
-    settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
+    st.sidebar.toggle("Enable KC Squeeze module", key=_control_key("kc_squeeze_enabled"))
+    st.sidebar.slider("BB length", 10, 60, key=_control_key("bb_length"))
+    st.sidebar.slider("BB multiplier", 1.0, 3.5, step=0.1, key=_control_key("bb_mult"))
+    st.sidebar.slider("KC length", 10, 60, key=_control_key("kc_length"))
+    st.sidebar.slider("KC multiplier", 1.0, 3.5, step=0.1, key=_control_key("kc_mult"))
+    st.sidebar.slider("KC release memory bars", 1, 8, key=_control_key("kc_release_recent_bars"))
+    st.sidebar.slider("KC chase limit ATR", 0.5, 3.0, step=0.1, key=_control_key("kc_release_chase_atr_limit"))
+    st.sidebar.slider("Trend SMA length", 50, 300, key=_control_key("trend_length"))
+    st.sidebar.slider("ATR period", 5, 50, key=_control_key("atr_period"))
+    st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, step=0.1, key=_control_key("atr_stop_multiplier"))
+    st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, step=0.1, key=_control_key("atr_tp_multiplier"))
+    st.sidebar.slider("Sell Take Profit 1 ATR", 0.50, 3.00, step=0.05, key=_control_key("sell_tp1_atr_multiplier"))
+    st.sidebar.slider("Sell Take Profit 2 ATR", 0.75, 5.00, step=0.05, key=_control_key("sell_tp2_atr_multiplier"))
+    st.sidebar.slider("Sell support buffer ATR", 0.00, 1.00, step=0.05, key=_control_key("sell_support_buffer_atr"))
+    st.sidebar.slider("Advisory risk %", 0.1, 2.0, step=0.1, key=_control_key("risk_per_trade_pct"))
+    st.sidebar.caption("BUY and SELL plan processing is always enabled.")
+    st.sidebar.toggle("Show Bollinger Bands", key=_control_key("show_bollinger_bands"))
+    st.sidebar.toggle("Show Keltner Channels", key=_control_key("show_keltner_channels"))
+    st.sidebar.toggle("Manual event block", key=_control_key("news_block_manual"))
+
+    if apply_clicked:
+        applied = staged_settings(settings)
+        applied["long_plans_enabled"] = True
+        applied["short_plans_enabled"] = True
+        persist_query_settings(applied)
+        st.sidebar.success("Settings applied and saved in URL.")
+        return applied
+
     settings["long_plans_enabled"] = True
     settings["short_plans_enabled"] = True
-    st.sidebar.caption("BUY and SELL plan processing is always enabled.")
-    settings["show_bollinger_bands"] = st.sidebar.toggle("Show Bollinger Bands", bool(settings.get("show_bollinger_bands", True)))
-    settings["show_keltner_channels"] = st.sidebar.toggle("Show Keltner Channels", bool(settings.get("show_keltner_channels", True)))
-    settings["news_block_manual"] = st.sidebar.toggle("Manual event block", bool(settings.get("news_block_manual", False)))
     return settings
 
 
@@ -267,6 +415,7 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
 
 
 settings = load_yaml(ROOT / "config/default_settings.yaml")
+settings = apply_query_settings(settings)
 presets = load_yaml(ROOT / "config/presets.yaml")
 settings = settings_panel(settings, presets)
 refresh_panel()
