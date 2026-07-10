@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import pandas as pd
 
-from .horizon_forecast import build_multi_horizon_forecast
+def rows_from_forecasts(forecasts: list[dict]) -> list[dict]:
+    """Convert horizon forecast dictionaries into UI/log rows.
 
-_PATCHED = False
-
-
-def _rows_from_forecasts(forecasts: list[dict]) -> list[dict]:
+    This module is intentionally side-effect free. It does not patch Streamlit,
+    write session state, or influence trade logic.
+    """
     rows: list[dict] = []
-    for item in forecasts:
+    for item in forecasts or []:
         rows.append(
             {
                 "Horizon": item.get("horizon"),
@@ -25,85 +24,8 @@ def _rows_from_forecasts(forecasts: list[dict]) -> list[dict]:
                 "EV sell": item.get("ev_sell_points"),
                 "Min EV": item.get("min_ev_points"),
                 "Decision": item.get("decision"),
-                "Expiry": item.get("expiry"),
                 "Training rows": item.get("training_rows"),
                 "Status": item.get("status"),
             }
         )
     return rows
-
-
-def _patch_streamlit_subheader() -> None:
-    global _PATCHED
-    if _PATCHED:
-        return
-    try:
-        import streamlit as st
-    except Exception:
-        return
-
-    original_subheader = st.subheader
-    if getattr(original_subheader, "_xauusd_multi_horizon_patch", False):
-        _PATCHED = True
-        return
-
-    def patched_subheader(body, *args, **kwargs):
-        body_text = str(body)
-        if body_text in {"Trade levels", "Active trade levels"}:
-            forecasts = st.session_state.get("_xauusd_multi_horizon_forecasts")
-            scan_id = st.session_state.get("_xauusd_multi_horizon_scan_id")
-            rendered_id = st.session_state.get("_xauusd_multi_horizon_rendered_id")
-            if forecasts and scan_id != rendered_id:
-                original_subheader("5m Signal + 1h / 4h / Daily Filters")
-                st.dataframe(pd.DataFrame(_rows_from_forecasts(forecasts)), use_container_width=True, hide_index=True)
-                st.caption(
-                    "Correction applied: 5m is the entry signal. 1h, 4h, and Daily are filters only. "
-                    "Final trade permission blocks entries when higher-timeframe filters are strongly opposite. "
-                    "Use 5m timeframe for clean 5m/1h/4h/Daily horizon math. Probabilities are model estimates, not guarantees."
-                )
-                st.session_state["_xauusd_multi_horizon_rendered_id"] = scan_id
-        return original_subheader(body, *args, **kwargs)
-
-    patched_subheader._xauusd_multi_horizon_patch = True
-    st.subheader = patched_subheader
-    _PATCHED = True
-
-
-def store_multi_horizon_for_streamlit(df, settings: dict) -> None:
-    """Compute scan-time predictors and arrange display inside the existing Forecast Manager page.
-
-    This avoids adding a new page. The table is injected immediately before the existing
-    Trade Levels section after SCAN NOW completes.
-    """
-    try:
-        import streamlit as st
-    except Exception:
-        return
-
-    _patch_streamlit_subheader()
-    try:
-        forecasts = build_multi_horizon_forecast(df, settings)
-    except Exception as exc:
-        forecasts = [
-            {
-                "horizon": "model",
-                "role": "error",
-                "status": "error",
-                "bias": "N/A",
-                "up_probability": None,
-                "down_probability": None,
-                "flat_probability": None,
-                "expected_return_pct": None,
-                "expected_low": None,
-                "expected_high": None,
-                "ev_buy_points": None,
-                "ev_sell_points": None,
-                "min_ev_points": None,
-                "decision": f"Forecast error: {exc}",
-                "expiry": "N/A",
-                "training_rows": 0,
-            }
-        ]
-
-    st.session_state["_xauusd_multi_horizon_forecasts"] = forecasts
-    st.session_state["_xauusd_multi_horizon_scan_id"] = str(pd.Timestamp.utcnow().value)
