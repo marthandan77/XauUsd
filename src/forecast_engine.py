@@ -15,13 +15,13 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
     force_wait = False
     wait_reason = ""
 
-    if macro.get("bias") in {"supportive", "mixed"}:
-        bull += 20
-    if macro.get("bias") in {"restrictive", "mixed"}:
-        bear += 20
-    if not macro.get("blocked"):
-        bull += 10
-        bear += 10
+    macro_bias = str(macro.get("bias", "mixed"))
+    if macro.get("blocked"):
+        force_wait = True
+        wait_reason = "Manual event/news block is active; no fresh scalp entry."
+        notes.append(wait_reason)
+    else:
+        notes.append(f"Macro context is {macro_bias}; used as context/filter, not as automatic score boost.")
 
     if regime in {"bull_trend", "bullish_release_confirmed"}:
         bull += 25
@@ -32,15 +32,15 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
         bear += 8 if market.near_resistance else 0
     elif regime == "compression":
         force_wait = True
-        wait_reason = "KC squeeze compression is active; wait for release direction."
+        wait_reason = wait_reason or "KC squeeze compression is active; wait for release direction."
         notes.append(wait_reason)
     elif regime in {"squeeze_release_now", "squeeze_release_recent"}:
         force_wait = True
-        wait_reason = "KC release is active but direction is not confirmed."
+        wait_reason = wait_reason or "KC release is active but direction is not confirmed."
         notes.append(wait_reason)
     elif regime in {"bullish_release_overextended", "bearish_release_overextended"}:
         force_wait = True
-        wait_reason = "KC release is confirmed but overextended; do not chase."
+        wait_reason = wait_reason or "KC release is confirmed but overextended; do not chase."
         notes.append(wait_reason)
     elif regime == "squeeze_release_expired":
         notes.append("Previous KC release window has expired; ignore old release.")
@@ -142,11 +142,13 @@ def score_forecast(row: dict, market, regime: str, macro: dict, settings: dict) 
         bias = "mixed"
         confidence = bull
 
+    rule_score = int(min(max(confidence, 0), 100))
     return {
         "bull_score": int(bull),
         "bear_score": int(bear),
         "bias": bias,
-        "confidence": int(min(max(confidence, 0), 100)),
+        "confidence": rule_score,
+        "rule_score": rule_score,
         "kc_state": kc_state,
         "kc_reason": kc_reason,
         "force_wait": bool(force_wait),
