@@ -13,6 +13,7 @@ def _rows_from_forecasts(forecasts: list[dict]) -> list[dict]:
         rows.append(
             {
                 "Horizon": item.get("horizon"),
+                "Role": item.get("role"),
                 "Bias": item.get("bias"),
                 "Up %": item.get("up_probability"),
                 "Down %": item.get("down_probability"),
@@ -53,12 +54,12 @@ def _patch_streamlit_subheader() -> None:
             scan_id = st.session_state.get("_xauusd_multi_horizon_scan_id")
             rendered_id = st.session_state.get("_xauusd_multi_horizon_rendered_id")
             if forecasts and scan_id != rendered_id:
-                original_subheader("5m / 15m / 30m / 1h predictors")
+                original_subheader("5m Signal + 1h / 4h / Daily Filters")
                 st.dataframe(pd.DataFrame(_rows_from_forecasts(forecasts)), use_container_width=True, hide_index=True)
                 st.caption(
-                    "Formula engine: rolling ridge regression on forward log returns plus residual volatility range. "
-                    "Final trade permission requires 15m/30m agreement and EV above threshold. "
-                    "Use 5m timeframe for exact 5m/15m/30m/1h horizons. Probabilities are model estimates, not guarantees."
+                    "Correction applied: 5m is the entry signal. 1h, 4h, and Daily are filters only. "
+                    "Final trade permission blocks entries when higher-timeframe filters are strongly opposite. "
+                    "Use 5m timeframe for clean 5m/1h/4h/Daily horizon math. Probabilities are model estimates, not guarantees."
                 )
                 st.session_state["_xauusd_multi_horizon_rendered_id"] = scan_id
         return original_subheader(body, *args, **kwargs)
@@ -86,6 +87,7 @@ def store_multi_horizon_for_streamlit(df, settings: dict) -> None:
         forecasts = [
             {
                 "horizon": "model",
+                "role": "error",
                 "status": "error",
                 "bias": "N/A",
                 "up_probability": None,
