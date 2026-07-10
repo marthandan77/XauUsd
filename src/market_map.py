@@ -5,6 +5,16 @@ from dataclasses import dataclass, asdict
 import pandas as pd
 
 
+BARS_PER_DAY = {
+    "5m": 288,
+    "15m": 96,
+    "30m": 48,
+    "1h": 24,
+    "4h": 6,
+    "1d": 1,
+}
+
+
 @dataclass
 class MarketMap:
     price: float
@@ -27,11 +37,30 @@ class MarketMap:
         return asdict(self)
 
 
+def _period_days(settings: dict) -> int:
+    period = str(settings.get("price_period", f"{settings.get('lookback_days', 7)}d"))
+    try:
+        if period.endswith("d"):
+            return max(int(period[:-1]), 1)
+        if period.endswith("mo"):
+            return max(int(period[:-2]) * 30, 1)
+        if period.endswith("y"):
+            return max(int(period[:-1]) * 365, 1)
+    except Exception:
+        pass
+    return max(int(settings.get("lookback_days", 7)), 1)
+
+
+def _bars_per_day(settings: dict) -> int:
+    return BARS_PER_DAY.get(str(settings.get("price_interval", "15m")), 96)
+
+
 def build_market_map(df: pd.DataFrame, settings: dict) -> MarketMap:
     if df.empty:
         raise ValueError("cannot build market map from empty data")
     latest = df.iloc[-1]
-    window = df.tail(max(80, int(settings.get("lookback_days", 7)) * 96))
+    requested_window = _period_days(settings) * _bars_per_day(settings)
+    window = df.tail(max(80, requested_window))
     price = float(latest["close"])
     high_7d = float(window["high"].max())
     low_7d = float(window["low"].min())
