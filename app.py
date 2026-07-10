@@ -14,6 +14,7 @@ from src.forecast_engine import choose_action, score_forecast
 from src.horizon_forecast import build_multi_horizon_forecast
 from src.indicators import add_indicators
 from src.kc_squeeze_engine import kc_squeeze_summary
+from src.learning.controller import generate_challenger, refresh_learning_metrics, run_learning_cycle
 from src.macro_engine import macro_context
 from src.market_map import build_market_map
 from src.range_model import price_bands
@@ -62,6 +63,11 @@ PERSISTED_SETTING_KEYS = [
     "horizon_min_probability_gap",
     "filter_min_probability_gap",
     "horizon_cost_points",
+    "walk_forward_tests",
+    "walk_forward_min_train",
+    "walk_forward_min_tests",
+    "walk_forward_min_side_samples",
+    "walk_forward_min_accuracy",
     "stale_candle_multiplier",
 ]
 
@@ -168,7 +174,7 @@ def clear_control_state() -> None:
     for key in list(st.session_state.keys()):
         if str(key).startswith(CONTROL_PREFIX):
             del st.session_state[key]
-    for key in ["last_scan_result", "last_scan_error", "last_scan_time"]:
+    for key in ["last_scan_result", "last_scan_error", "last_scan_time", "learning_metrics", "learning_challenger"]:
         st.session_state.pop(key, None)
 
 
@@ -374,6 +380,11 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     st.sidebar.slider("5m probability gap", 0.01, 0.20, step=0.01, key=_control_key("horizon_min_probability_gap"))
     st.sidebar.slider("Filter probability gap", 0.01, 0.25, step=0.01, key=_control_key("filter_min_probability_gap"))
     st.sidebar.slider("Assumed cost points", 0.0, 3.0, step=0.05, key=_control_key("horizon_cost_points"))
+    st.sidebar.slider("Walk-forward tests", 20, 200, step=10, key=_control_key("walk_forward_tests"))
+    st.sidebar.slider("Walk-forward min train", 120, 1000, step=20, key=_control_key("walk_forward_min_train"))
+    st.sidebar.slider("Walk-forward min tests", 10, 120, step=5, key=_control_key("walk_forward_min_tests"))
+    st.sidebar.slider("Walk-forward side samples", 3, 50, step=1, key=_control_key("walk_forward_min_side_samples"))
+    st.sidebar.slider("Walk-forward min accuracy", 50.0, 75.0, step=1.0, key=_control_key("walk_forward_min_accuracy"))
     st.sidebar.slider("Stale candle multiplier", 1.0, 5.0, step=0.5, key=_control_key("stale_candle_multiplier"))
 
     st.sidebar.caption("BUY and SELL plan processing is always enabled.")
@@ -721,19 +732,34 @@ def _horizon_rows(forecasts: list[dict]) -> list[dict]:
     rows = []
     for item in forecasts or []:
         rows.append({
+            "Timeframe": item.get("horizon"),
+            "Purpose": "Entry" if item.get("role") == "Signal" else "Filter",
+            "Bull Confidence": item.get("bull_confidence"),
+            "Bear Confidence": item.get("bear_confidence"),
+            "Validation": item.get("validation_status"),
+            "Samples": item.get("validation_tests"),
+            "Read": item.get("decision"),
+        })
+    return rows
+
+
+def _horizon_advanced_rows(forecasts: list[dict]) -> list[dict]:
+    rows = []
+    for item in forecasts or []:
+        rows.append({
             "Horizon": item.get("horizon"),
             "Role": item.get("role"),
             "Bias": item.get("bias"),
-            "Up %": item.get("up_probability"),
-            "Down %": item.get("down_probability"),
-            "Flat %": item.get("flat_probability"),
-            "Expected return %": item.get("expected_return_pct"),
-            "Expected low": item.get("expected_low"),
-            "Expected high": item.get("expected_high"),
+            "Model Up %": item.get("model_up_probability"),
+            "Model Down %": item.get("model_down_probability"),
             "EV buy": item.get("ev_buy_points"),
             "EV sell": item.get("ev_sell_points"),
             "Min EV": item.get("min_ev_points"),
-            "Decision": item.get("decision"),
+            "Active Accuracy": item.get("active_accuracy"),
+            "Active Samples": item.get("active_samples"),
+            "MAE points": item.get("mae_points"),
+            "Expected low": item.get("expected_low"),
+            "Expected high": item.get("expected_high"),
             "Training rows": item.get("training_rows"),
             "Status": item.get("status"),
         })
@@ -741,16 +767,17 @@ def _horizon_rows(forecasts: list[dict]) -> list[dict]:
 
 
 def render_multi_horizon_panel(result: dict) -> None:
-    st.subheader("5m Signal + 1h / 4h / Daily Filters")
+    st.subheader("5m Entry + Higher-Timeframe Filters")
     forecasts = result.get("multi_horizon") or []
     if not forecasts:
         st.info("Multi-horizon output is unavailable for this scan.")
         return
     st.dataframe(pd.DataFrame(_horizon_rows(forecasts)), use_container_width=True, hide_index=True)
     st.caption(
-        "Processing path: run_strategy_scan → build_multi_horizon_forecast → apply_veto. "
-        "5m is the entry signal. 1h, 4h, and Daily are filters only. Probabilities are model estimates, not guarantees."
+        "Bull/Bear Confidence is walk-forward validated hit-rate. 5m is the entry signal. 1h, 4h, and Daily are filters only."
     )
+    with st.expander("Advanced horizon model details"):
+        st.dataframe(pd.DataFrame(_horizon_advanced_rows(forecasts)), use_container_width=True, hide_index=True)
 
 
 def render_trade_levels(result: dict) -> None:
@@ -895,6 +922,47 @@ def render_log_snapshot(result: dict) -> None:
     st.download_button("Download horizon CSV", horizon.to_csv(index=False), file_name="xauusd_horizon_snapshot.csv")
 
 
+def render_learning_page(result: dict | None) -> None:
+    st.subheader("GitHub Learning")
+    st.write("Learning is GitHub-backed: each scan can log predictions, evaluate expired outcomes, and generate challenger settings. Live settings are not overwritten automatically.")
+
+    if result is not None and result.get("learning"):
+        st.subheader("Last learning cycle")
+        st.json(result.get("learning"))
+
+    left, right = st.columns(2)
+    if left.button("Refresh learning metrics", use_container_width=True):
+        with st.spinner("Reading learning outcomes from GitHub..."):
+            st.session_state["learning_metrics"] = refresh_learning_metrics()
+
+    if right.button("Generate challenger settings", use_container_width=True, disabled=result is None or not result.get("ok", False)):
+        with st.spinner("Testing bounded challenger settings with walk-forward validation..."):
+            st.session_state["learning_challenger"] = generate_challenger(result)
+
+    metrics_payload = st.session_state.get("learning_metrics") or (result or {}).get("learning", {}).get("metrics")
+    if metrics_payload:
+        st.subheader("Outcome metrics")
+        metrics = metrics_payload.get("metrics", [])
+        if metrics:
+            st.dataframe(pd.DataFrame(metrics), use_container_width=True, hide_index=True)
+            st.download_button("Download learning report", metrics_payload.get("report", ""), file_name="xauusd_learning_report.md")
+        else:
+            st.info("No completed outcomes yet. Let predictions expire, then run another scan or refresh metrics.")
+
+    challenger = st.session_state.get("learning_challenger")
+    if challenger:
+        st.subheader("Challenger settings")
+        if challenger.get("ok"):
+            tuned = challenger.get("challenger", {}).get("tuned_settings", {})
+            st.success("Challenger generated and written to config/challenger_settings.yaml if GitHub write access is configured.")
+            st.json(tuned)
+            st.caption("Manual review required before promotion to live settings.")
+        else:
+            st.warning(challenger.get("reason", "Challenger generation failed."))
+        with st.expander("Challenger details"):
+            st.json(challenger)
+
+
 settings = load_yaml(ROOT / "config/default_settings.yaml")
 settings = apply_query_settings(settings)
 presets = load_yaml(ROOT / "config/presets.yaml")
@@ -905,13 +973,15 @@ settings = data_panel(settings)
 
 st.title("XAU/USD Forecast Manager")
 st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio("Page", ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
+page = st.sidebar.radio("Page", ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Learning", "Settings", "Log Snapshot"])
 
 if page == "Forecast Manager":
     scan_label = "RESCAN NOW" if st.session_state.get("last_scan_result") else "SCAN NOW"
     if st.button(scan_label, type="primary", use_container_width=True):
         with st.spinner("Scanning XAU/USD and running strategy..."):
-            st.session_state["last_scan_result"] = run_strategy_scan(settings, macro_bias)
+            scan_result = run_strategy_scan(settings, macro_bias)
+            scan_result["learning"] = run_learning_cycle(scan_result)
+            st.session_state["last_scan_result"] = scan_result
 
 result = st.session_state.get("last_scan_result")
 
@@ -937,6 +1007,8 @@ elif page == "Macro / News":
     else:
         st.json(result["macro"])
     st.write("Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches. API calendar can be added later.")
+elif page == "Learning":
+    render_learning_page(result)
 elif page == "Settings":
     st.subheader("Active settings")
     st.json(safe_settings(settings))
