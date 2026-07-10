@@ -4,7 +4,7 @@ from __future__ import annotations
 def explain(regime: str, scores: dict, veto: dict, market, macro: dict) -> str:
     text = [
         f"Regime: {regime}.",
-        f"Bias: {scores.get('bias')} with confidence {scores.get('confidence')}.",
+        f"Bias: {scores.get('bias')} with rule score {scores.get('rule_score', scores.get('confidence'))}.",
         f"Location: {market.range_position_pct:.1f}% of current range.",
         f"Macro context: {macro.get('bias')}.",
     ]
