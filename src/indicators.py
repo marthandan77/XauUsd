@@ -190,12 +190,4 @@ def add_indicators(bars: pd.DataFrame, settings: dict) -> pd.DataFrame:
     df.loc[df["release_bearish_confirmed"], "release_direction"] = "bearish"
 
     df["realized_vol"] = realized_volatility(df["close"], rv_length)
-
-    try:
-        from .horizon_runtime import store_multi_horizon_for_streamlit
-
-        store_multi_horizon_for_streamlit(df, settings)
-    except Exception:
-        pass
-
     return df
