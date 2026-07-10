@@ -62,4 +62,9 @@ horizon_ridge_alpha: 2.0
 horizon_min_probability_gap: 0.06
 filter_min_probability_gap: 0.08
 horizon_cost_points: 0.30
+walk_forward_tests: 80
+walk_forward_min_train: 300
+walk_forward_min_tests: 30
+walk_forward_min_side_samples: 8
+walk_forward_min_accuracy: 55.0
 stale_candle_multiplier: 2.0
