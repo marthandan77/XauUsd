@@ -8,6 +8,7 @@ from .trade_plan import room_ratio
 ACTIONABLE_PLANS = {"BUY PLAN", "SELL PLAN"}
 UNCONFIRMED_RELEASE_REGIMES = {"compression", "squeeze_release_now", "squeeze_release_recent"}
 OVEREXTENDED_RELEASE_REGIMES = {"bullish_release_overextended", "bearish_release_overextended"}
+FILTER_HORIZONS = ["1h", "4h", "Daily"]
 
 
 def _finite_float(value, default: float | None = None):
@@ -38,6 +39,17 @@ def _ev_ok(item: dict, side: str) -> bool:
     return ev >= float(min_ev or 0.0)
 
 
+def _strongly_opposite(item: dict, action: str) -> bool:
+    if item.get("status") != "ok":
+        return False
+    bias = item.get("bias")
+    if action == "BUY PLAN":
+        return bias == "bearish"
+    if action == "SELL PLAN":
+        return bias == "bullish"
+    return False
+
+
 def _add_horizon_alignment_veto(action: str, reasons: list[str], settings: dict) -> None:
     if action not in ACTIONABLE_PLANS:
         return
@@ -45,32 +57,28 @@ def _add_horizon_alignment_veto(action: str, reasons: list[str], settings: dict)
         return
 
     horizons = _horizon_map()
-    h15 = horizons.get("15m")
-    h30 = horizons.get("30m")
-    h1h = horizons.get("1h")
-
-    if not h15 or not h30:
-        reasons.append("multi-horizon forecast unavailable; cannot confirm 15m/30m agreement")
-        return
-    if h15.get("status") != "ok" or h30.get("status") != "ok":
-        reasons.append("multi-horizon forecast not clean enough for final trade permission")
+    h5 = horizons.get("5m")
+    if not h5 or h5.get("status") != "ok":
+        reasons.append("5m signal forecast unavailable; cannot confirm scalp timing")
         return
 
     if action == "BUY PLAN":
-        if h15.get("bias") != "bullish" or h30.get("bias") != "bullish":
-            reasons.append("15m and 30m predictors do not agree bullish")
-        if not _ev_ok(h15, "buy") or not _ev_ok(h30, "buy"):
-            reasons.append("15m/30m buy EV is below minimum threshold")
-        if h1h and h1h.get("status") == "ok" and h1h.get("bias") == "bearish":
-            reasons.append("1h predictor is bearish danger filter")
+        if h5.get("bias") != "bullish" or not _ev_ok(h5, "buy"):
+            reasons.append("5m signal does not confirm buy edge above minimum EV")
+    elif action == "SELL PLAN":
+        if h5.get("bias") != "bearish" or not _ev_ok(h5, "sell"):
+            reasons.append("5m signal does not confirm sell edge above minimum EV")
 
-    if action == "SELL PLAN":
-        if h15.get("bias") != "bearish" or h30.get("bias") != "bearish":
-            reasons.append("15m and 30m predictors do not agree bearish")
-        if not _ev_ok(h15, "sell") or not _ev_ok(h30, "sell"):
-            reasons.append("15m/30m sell EV is below minimum threshold")
-        if h1h and h1h.get("status") == "ok" and h1h.get("bias") == "bullish":
-            reasons.append("1h predictor is bullish danger filter")
+    for label in FILTER_HORIZONS:
+        item = horizons.get(label)
+        if not item:
+            reasons.append(f"{label} filter unavailable")
+            continue
+        if item.get("status") != "ok":
+            reasons.append(f"{label} filter not clean enough for final trade permission")
+            continue
+        if _strongly_opposite(item, action):
+            reasons.append(f"{label} filter is opposite to the trade direction")
 
 
 def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settings: dict, row: dict | None = None) -> dict:
