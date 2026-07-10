@@ -67,4 +67,5 @@ walk_forward_min_train: 300
 walk_forward_min_tests: 30
 walk_forward_min_side_samples: 8
 walk_forward_min_accuracy: 55.0
+learning_backfill_points: 60
 stale_candle_multiplier: 2.0
