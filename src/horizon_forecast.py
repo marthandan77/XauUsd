@@ -158,26 +158,159 @@ def _bias_from_probs(p_up: float, p_down: float, settings: dict, mode: str) -> s
     return "mixed"
 
 
-def _decision(label: str, role: str, mode: str, p_up: float, p_down: float, ev_buy: float, ev_sell: float, settings: dict) -> str:
+def _validation_prediction(mu: float, sigma: float, cost_return: float, settings: dict, mode: str) -> str:
+    sigma = max(float(sigma), 1e-6)
+    p_up = 1.0 - _norm_cdf((cost_return - mu) / sigma)
+    p_down = _norm_cdf((-cost_return - mu) / sigma)
+    return _bias_from_probs(p_up, p_down, settings, mode)
+
+
+def _actual_label(y_value: float, cost_return: float) -> str:
+    if y_value > cost_return:
+        return "bullish"
+    if y_value < -cost_return:
+        return "bearish"
+    return "mixed"
+
+
+def _walk_forward_validation(
+    features: pd.DataFrame,
+    target: pd.Series,
+    close: pd.Series,
+    settings: dict,
+    mode: str,
+    steps: int,
+    cost_points: float,
+) -> dict:
+    max_tests = int(settings.get("walk_forward_tests", 80))
+    min_train = int(settings.get("walk_forward_min_train", 300))
+    lookback = int(settings.get("horizon_model_lookback_bars", 3000))
+    alpha = float(settings.get("horizon_ridge_alpha", 2.0))
+
+    last_target_idx = max(len(target) - steps, 0)
+    if last_target_idx <= min_train:
+        return _empty_validation(0)
+
+    start_idx = max(min_train, last_target_idx - max_tests)
+    tested = 0
+    bull_total = bull_hits = 0
+    bear_total = bear_hits = 0
+    mixed_total = mixed_hits = 0
+    active_total = active_hits = 0
+    abs_errors_points: list[float] = []
+
+    for idx in range(start_idx, last_target_idx):
+        train_start = max(0, idx - lookback)
+        x_train = features.iloc[train_start:idx].to_numpy(dtype=float)
+        y_train = target.iloc[train_start:idx].to_numpy(dtype=float)
+        x_now = features.iloc[idx].to_numpy(dtype=float)
+        y_now = target.iloc[idx]
+        price_now = _safe_float(close.iloc[idx], 0.0)
+        if not math.isfinite(float(y_now)) or price_now <= 0:
+            continue
+
+        mu, resid_std, train_rows = _ridge_fit_predict(x_train, y_train, x_now, alpha=alpha)
+        if train_rows < min_train:
+            continue
+        sigma = resid_std if math.isfinite(float(resid_std)) and float(resid_std) > 0 else _fallback_sigma(pd.Series(y_train).dropna(), steps)
+        cost_return = float(cost_points) / max(price_now, 0.01)
+        predicted = _validation_prediction(mu, sigma, cost_return, settings, mode)
+        actual = _actual_label(float(y_now), cost_return)
+        tested += 1
+        abs_errors_points.append(abs(float(y_now) - float(mu)) * price_now)
+
+        if predicted == "bullish":
+            bull_total += 1
+            active_total += 1
+            if actual == "bullish":
+                bull_hits += 1
+                active_hits += 1
+        elif predicted == "bearish":
+            bear_total += 1
+            active_total += 1
+            if actual == "bearish":
+                bear_hits += 1
+                active_hits += 1
+        else:
+            mixed_total += 1
+            if actual == "mixed":
+                mixed_hits += 1
+
+    return {
+        "tested": tested,
+        "bull_samples": bull_total,
+        "bear_samples": bear_total,
+        "mixed_samples": mixed_total,
+        "bull_accuracy": _pct(bull_hits, bull_total),
+        "bear_accuracy": _pct(bear_hits, bear_total),
+        "mixed_accuracy": _pct(mixed_hits, mixed_total),
+        "active_accuracy": _pct(active_hits, active_total),
+        "active_samples": active_total,
+        "mae_points": round(float(np.mean(abs_errors_points)), 2) if abs_errors_points else None,
+    }
+
+
+def _pct(hits: int, total: int):
+    if total <= 0:
+        return None
+    return round((hits / total) * 100.0, 1)
+
+
+def _empty_validation(tested: int) -> dict:
+    return {
+        "tested": tested,
+        "bull_samples": 0,
+        "bear_samples": 0,
+        "mixed_samples": 0,
+        "bull_accuracy": None,
+        "bear_accuracy": None,
+        "mixed_accuracy": None,
+        "active_accuracy": None,
+        "active_samples": 0,
+        "mae_points": None,
+    }
+
+
+def _side_validated(validation: dict, side: str, settings: dict) -> bool:
+    min_samples = int(settings.get("walk_forward_min_side_samples", 8))
+    min_accuracy = float(settings.get("walk_forward_min_accuracy", 55.0))
+    samples_key = "bull_samples" if side == "bullish" else "bear_samples"
+    accuracy_key = "bull_accuracy" if side == "bullish" else "bear_accuracy"
+    accuracy = validation.get(accuracy_key)
+    return int(validation.get(samples_key, 0) or 0) >= min_samples and accuracy is not None and float(accuracy) >= min_accuracy
+
+
+def _reliability(validation: dict, settings: dict) -> str:
+    min_tests = int(settings.get("walk_forward_min_tests", 30))
+    min_accuracy = float(settings.get("walk_forward_min_accuracy", 55.0))
+    active_accuracy = validation.get("active_accuracy")
+    if int(validation.get("tested", 0) or 0) < min_tests:
+        return "Unproven"
+    if active_accuracy is None:
+        return "No active history"
+    if float(active_accuracy) >= min_accuracy:
+        return "Validated"
+    return "Failed validation"
+
+
+def _decision(label: str, role: str, mode: str, bias: str, ev_buy: float, ev_sell: float, validation: dict, settings: dict) -> str:
     if bool(settings.get("signals_disabled", False)):
         return "Disabled - sample data"
 
-    bias = _bias_from_probs(p_up, p_down, settings, mode)
     if mode == "filter":
-        if bias == "bullish":
-            return f"{role}: bullish pressure"
-        if bias == "bearish":
-            return f"{role}: bearish pressure"
+        if bias in {"bullish", "bearish"} and _side_validated(validation, bias, settings):
+            return f"{role}: validated {bias} pressure"
+        if bias in {"bullish", "bearish"}:
+            return f"{role}: unproven {bias} pressure"
         return f"{role}: mixed / no block"
 
     min_ev = _min_ev_points(label, settings)
-    prob_gap = float(settings.get("horizon_min_probability_gap", 0.06))
-    if p_up >= p_down + prob_gap and ev_buy >= min_ev:
-        return "Buy edge"
-    if p_down >= p_up + prob_gap and ev_sell >= min_ev:
-        return "Sell edge"
-    if max(p_up, p_down) >= 0.55:
-        return "Watch"
+    if bias == "bullish" and ev_buy >= min_ev and _side_validated(validation, "bullish", settings):
+        return "Validated buy edge"
+    if bias == "bearish" and ev_sell >= min_ev and _side_validated(validation, "bearish", settings):
+        return "Validated sell edge"
+    if bias in {"bullish", "bearish"}:
+        return "Unproven edge - wait"
     return "No edge"
 
 
@@ -198,6 +331,10 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
             "up_probability": None,
             "down_probability": None,
             "flat_probability": None,
+            "bull_confidence": None,
+            "bear_confidence": None,
+            "validation_status": "Unproven",
+            "validation_tests": 0,
             "expected_return_pct": None,
             "expected_low": None,
             "expected_high": None,
@@ -241,30 +378,44 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
     ev_buy = p_up * up_move - p_down * down_move - cost_points
     ev_sell = p_down * down_move - p_up * up_move - cost_points
     bias = _bias_from_probs(p_up, p_down, settings, mode)
+    validation = _walk_forward_validation(features, target, close, settings, mode, steps, cost_points)
+    validation_status = _reliability(validation, settings)
 
     return {
         "horizon": label,
         "role": role,
         "status": "ok",
         "bias": bias,
-        "up_probability": round(p_up * 100.0, 1),
-        "down_probability": round(p_down * 100.0, 1),
-        "flat_probability": round(p_flat * 100.0, 1),
+        "up_probability": validation.get("bull_accuracy"),
+        "down_probability": validation.get("bear_accuracy"),
+        "flat_probability": validation.get("mixed_accuracy"),
+        "bull_confidence": validation.get("bull_accuracy"),
+        "bear_confidence": validation.get("bear_accuracy"),
+        "validation_status": validation_status,
+        "validation_tests": validation.get("tested"),
+        "bull_validation_samples": validation.get("bull_samples"),
+        "bear_validation_samples": validation.get("bear_samples"),
+        "active_accuracy": validation.get("active_accuracy"),
+        "active_samples": validation.get("active_samples"),
+        "mae_points": validation.get("mae_points"),
+        "model_up_probability": round(p_up * 100.0, 1),
+        "model_down_probability": round(p_down * 100.0, 1),
+        "model_flat_probability": round(p_flat * 100.0, 1),
         "expected_return_pct": round((math.exp(mu) - 1.0) * 100.0, 4),
         "expected_low": round(lower, 2),
         "expected_high": round(upper, 2),
         "ev_buy_points": round(ev_buy, 2),
         "ev_sell_points": round(ev_sell, 2),
         "min_ev_points": round(min_ev, 2) if mode == "entry" else None,
-        "decision": _decision(label, role, mode, p_up, p_down, ev_buy, ev_sell, settings),
+        "decision": _decision(label, role, mode, bias, ev_buy, ev_sell, validation, settings),
         "expiry": label,
         "training_rows": training_rows,
-        "method": "rolling ridge return + residual volatility; 5m signal, higher horizons filter only",
+        "method": "rolling ridge return + walk-forward validation; confidence is recent validated hit-rate",
     }
 
 
 def build_multi_horizon_forecast(df: pd.DataFrame, settings: dict) -> list[dict]:
-    """Build formula-based 5m signal plus 1h/4h/Daily filters from enriched OHLC data."""
+    """Build walk-forward validated 5m signal plus 1h/4h/Daily filters from enriched OHLC data."""
     if df is None or df.empty or len(df) < 120:
         return [{
             "horizon": label,
@@ -274,6 +425,10 @@ def build_multi_horizon_forecast(df: pd.DataFrame, settings: dict) -> list[dict]
             "up_probability": None,
             "down_probability": None,
             "flat_probability": None,
+            "bull_confidence": None,
+            "bear_confidence": None,
+            "validation_status": "Unproven",
+            "validation_tests": 0,
             "expected_return_pct": None,
             "expected_low": None,
             "expected_high": None,
@@ -283,7 +438,7 @@ def build_multi_horizon_forecast(df: pd.DataFrame, settings: dict) -> list[dict]
             "decision": "Need more clean bars",
             "expiry": label,
             "training_rows": 0,
-            "method": "rolling ridge return + residual volatility; 5m signal, higher horizons filter only",
+            "method": "walk-forward validation unavailable",
         } for label, config in HORIZON_CONFIG.items()]
 
     features = _feature_frame(df, settings)
