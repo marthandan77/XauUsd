@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 
-BULLISH_EXTENSION_REGIMES = {"bull_trend", "bullish_squeeze_breakout", "bullish_release_confirmed"}
-BEARISH_EXTENSION_REGIMES = {"bear_trend", "bearish_squeeze_breakout", "bearish_release_confirmed"}
+BULLISH_EXTENSION_REGIMES = {"bull_trend", "bullish_release_confirmed"}
+BEARISH_EXTENSION_REGIMES = {"bear_trend", "bearish_release_confirmed"}
 
 
 def price_bands(market, regime: str) -> dict:
