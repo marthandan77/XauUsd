@@ -16,7 +16,7 @@ class FeedResult:
 
 
 def make_sample_bars(rows: int = 900, freq: str = "15min") -> pd.DataFrame:
-    index = pd.date_range(end=pd.Timestamp.utcnow(), periods=rows, freq=freq)
+    index = pd.date_range(end=pd.Timestamp.now(tz="Asia/Singapore"), periods=rows, freq=freq)
     rng = np.random.default_rng(7)
     base = 2350 + np.cumsum(rng.normal(0, 1.45, rows))
     open_ = base + rng.normal(0, 0.55, rows)
@@ -146,15 +146,23 @@ def _outputsize(settings: dict) -> int:
     return max(min(requested, maximum), minimum)
 
 
+def _timestamp_in_timezone(value, timezone: str) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize(timezone)
+    return ts.tz_convert(timezone)
+
+
 def _mark_stale_if_needed(bars: pd.DataFrame, settings: dict) -> tuple[pd.DataFrame, str]:
     if bars.empty:
         return bars, ""
     df = bars.copy()
     df["data_stale"] = False
     interval = str(settings.get("price_interval", "15m"))
+    timezone = str(settings.get("timezone", "Asia/Singapore"))
     allowed_minutes = float(settings.get("stale_candle_multiplier", 2.0)) * _interval_minutes(interval)
-    latest = pd.to_datetime(df.index[-1])
-    now = pd.Timestamp.now(tz=latest.tz) if latest.tzinfo is not None else pd.Timestamp.utcnow().tz_localize(None)
+    latest = _timestamp_in_timezone(df.index[-1], timezone)
+    now = pd.Timestamp.now(tz=timezone)
     age_minutes = (now - latest).total_seconds() / 60.0
     if age_minutes > allowed_minutes:
         df.loc[df.index[-1], "data_stale"] = True
