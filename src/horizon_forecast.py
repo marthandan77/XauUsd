@@ -6,11 +6,11 @@ import numpy as np
 import pandas as pd
 
 
-HORIZONS_MINUTES = {
-    "5m": 5,
-    "15m": 15,
-    "30m": 30,
-    "1h": 60,
+HORIZON_CONFIG = {
+    "5m": {"minutes": 5, "role": "Signal", "mode": "entry"},
+    "1h": {"minutes": 60, "role": "Filter", "mode": "filter"},
+    "4h": {"minutes": 240, "role": "Filter", "mode": "filter"},
+    "Daily": {"minutes": 1440, "role": "Filter", "mode": "filter"},
 }
 
 INTERVAL_MINUTES = {
@@ -25,9 +25,9 @@ INTERVAL_MINUTES = {
 
 DEFAULT_MIN_EV_POINTS = {
     "5m": 0.50,
-    "15m": 0.80,
-    "30m": 1.20,
     "1h": 1.80,
+    "4h": 4.00,
+    "Daily": 8.00,
 }
 
 
@@ -45,13 +45,22 @@ def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
 
 
-def _ridge_fit_predict(x_train: np.ndarray, y_train: np.ndarray, x_now: np.ndarray, alpha: float = 1.0) -> tuple[float, float, int]:
+def _base_minutes(settings: dict) -> int:
+    return INTERVAL_MINUTES.get(str(settings.get("price_interval", "5m")), 5)
+
+
+def _bars_for_minutes(settings: dict, minutes: int, minimum: int = 1) -> int:
+    base = max(_base_minutes(settings), 1)
+    return max(int(round(float(minutes) / float(base))), minimum)
+
+
+def _ridge_fit_predict(x_train: np.ndarray, y_train: np.ndarray, x_now: np.ndarray, alpha: float = 2.0) -> tuple[float, float, int]:
     """Fit a small ridge model with closed-form linear algebra and predict the latest row."""
     valid = np.isfinite(y_train) & np.isfinite(x_train).all(axis=1)
     x_train = x_train[valid]
     y_train = y_train[valid]
 
-    if len(y_train) < max(80, x_train.shape[1] * 8):
+    if len(y_train) < max(120, x_train.shape[1] * 10):
         return 0.0, float(np.nan), int(len(y_train))
 
     mean = x_train.mean(axis=0)
@@ -74,7 +83,7 @@ def _ridge_fit_predict(x_train: np.ndarray, y_train: np.ndarray, x_now: np.ndarr
     return pred, resid_std, int(len(y_train))
 
 
-def _feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+def _feature_frame(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
     close = df["close"].astype(float)
     high = df["high"].astype(float)
     low = df["low"].astype(float)
@@ -83,18 +92,28 @@ def _feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     atr = df.get("atr", high - low).astype(float).replace(0, np.nan)
     price = close.replace(0, np.nan)
 
-    rolling_high = high.rolling(288, min_periods=30).max()
-    rolling_low = low.rolling(288, min_periods=30).min()
+    bars_15m = _bars_for_minutes(settings, 15, 1)
+    bars_30m = _bars_for_minutes(settings, 30, 1)
+    bars_1h = _bars_for_minutes(settings, 60, 1)
+    bars_4h = _bars_for_minutes(settings, 240, 1)
+    bars_1d = _bars_for_minutes(settings, 1440, 1)
+
+    range_window = max(bars_1d, 30)
+    rolling_high = high.rolling(range_window, min_periods=min(30, range_window)).max()
+    rolling_low = low.rolling(range_window, min_periods=min(30, range_window)).min()
     range_position = ((close - rolling_low) / (rolling_high - rolling_low).replace(0, np.nan)).clip(0, 1)
 
     features = pd.DataFrame(index=df.index)
     features["ret_1"] = ret
-    features["ret_3"] = ret.rolling(3, min_periods=2).sum()
-    features["ret_6"] = ret.rolling(6, min_periods=3).sum()
-    features["ret_12"] = ret.rolling(12, min_periods=6).sum()
-    features["vol_6"] = ret.rolling(6, min_periods=3).std()
-    features["vol_12"] = ret.rolling(12, min_periods=6).std()
-    features["vol_24"] = ret.rolling(24, min_periods=12).std()
+    features["ret_15m"] = ret.rolling(bars_15m, min_periods=max(1, min(bars_15m, 3))).sum()
+    features["ret_30m"] = ret.rolling(bars_30m, min_periods=max(1, min(bars_30m, 3))).sum()
+    features["ret_1h"] = ret.rolling(bars_1h, min_periods=max(1, min(bars_1h, 6))).sum()
+    features["ret_4h"] = ret.rolling(bars_4h, min_periods=max(1, min(bars_4h, 12))).sum()
+    features["ret_1d"] = ret.rolling(bars_1d, min_periods=max(1, min(bars_1d, 24))).sum()
+    features["vol_30m"] = ret.rolling(bars_30m, min_periods=max(2, min(bars_30m, 6))).std()
+    features["vol_1h"] = ret.rolling(bars_1h, min_periods=max(2, min(bars_1h, 8))).std()
+    features["vol_4h"] = ret.rolling(bars_4h, min_periods=max(2, min(bars_4h, 12))).std()
+    features["vol_1d"] = ret.rolling(bars_1d, min_periods=max(2, min(bars_1d, 24))).std()
     features["body_atr"] = (close - open_) / atr
     features["range_atr"] = (high - low) / atr
     features["atr_pct"] = atr / price
@@ -113,7 +132,8 @@ def _feature_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fallback_sigma(returns: pd.Series, steps: int) -> float:
-    base = returns.tail(144).std()
+    window = min(max(steps * 8, 48), 576)
+    base = returns.tail(window).std()
     if not math.isfinite(float(base)) or float(base) <= 0:
         base = returns.std()
     if not math.isfinite(float(base)) or float(base) <= 0:
@@ -128,9 +148,28 @@ def _min_ev_points(label: str, settings: dict) -> float:
     return float(settings.get("min_ev_points", DEFAULT_MIN_EV_POINTS.get(label, 0.8)))
 
 
-def _decision(label: str, p_up: float, p_down: float, ev_buy: float, ev_sell: float, settings: dict) -> str:
+def _bias_from_probs(p_up: float, p_down: float, settings: dict, mode: str) -> str:
+    gap_key = "filter_min_probability_gap" if mode == "filter" else "horizon_min_probability_gap"
+    prob_gap = float(settings.get(gap_key, 0.08 if mode == "filter" else 0.06))
+    if p_up > p_down + prob_gap:
+        return "bullish"
+    if p_down > p_up + prob_gap:
+        return "bearish"
+    return "mixed"
+
+
+def _decision(label: str, role: str, mode: str, p_up: float, p_down: float, ev_buy: float, ev_sell: float, settings: dict) -> str:
     if bool(settings.get("signals_disabled", False)):
         return "Disabled - sample data"
+
+    bias = _bias_from_probs(p_up, p_down, settings, mode)
+    if mode == "filter":
+        if bias == "bullish":
+            return f"{role}: bullish pressure"
+        if bias == "bearish":
+            return f"{role}: bearish pressure"
+        return f"{role}: mixed / no block"
+
     min_ev = _min_ev_points(label, settings)
     prob_gap = float(settings.get("horizon_min_probability_gap", 0.06))
     if p_up >= p_down + prob_gap and ev_buy >= min_ev:
@@ -142,15 +181,18 @@ def _decision(label: str, p_up: float, p_down: float, ev_buy: float, ev_sell: fl
     return "No edge"
 
 
-def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, label: str, horizon_minutes: int) -> dict:
-    interval = str(settings.get("price_interval", "5m"))
-    base_minutes = INTERVAL_MINUTES.get(interval, 5)
+def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, label: str, config: dict) -> dict:
+    horizon_minutes = int(config["minutes"])
+    role = str(config["role"])
+    mode = str(config["mode"])
+    base_minutes = _base_minutes(settings)
     price = _safe_float(df["close"].iloc[-1], 0.0)
     min_ev = _min_ev_points(label, settings)
 
     if base_minutes > horizon_minutes or horizon_minutes % base_minutes != 0:
         return {
             "horizon": label,
+            "role": role,
             "status": "unavailable",
             "bias": "N/A",
             "up_probability": None,
@@ -161,11 +203,11 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
             "expected_high": None,
             "ev_buy_points": None,
             "ev_sell_points": None,
-            "min_ev_points": min_ev,
-            "decision": f"Use {base_minutes}m base or switch to 5m timeframe",
+            "min_ev_points": min_ev if mode == "entry" else None,
+            "decision": f"Use 5m base timeframe for this horizon",
             "expiry": label,
             "training_rows": 0,
-            "method": "requires finer/even timeframe",
+            "method": "requires 5m/even base timeframe",
         }
 
     steps = max(int(horizon_minutes / base_minutes), 1)
@@ -173,13 +215,13 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
     target = np.log(close.shift(-steps) / close).replace([np.inf, -np.inf], np.nan)
 
     train_cutoff = max(len(df) - steps, 0)
-    lookback = int(settings.get("horizon_model_lookback_bars", 1500))
+    lookback = int(settings.get("horizon_model_lookback_bars", 3000))
     start = max(0, train_cutoff - lookback)
     x_train = features.iloc[start:train_cutoff].to_numpy(dtype=float)
     y_train = target.iloc[start:train_cutoff].to_numpy(dtype=float)
     x_now = features.iloc[-1].to_numpy(dtype=float)
 
-    mu, resid_std, training_rows = _ridge_fit_predict(x_train, y_train, x_now, alpha=float(settings.get("horizon_ridge_alpha", 1.0)))
+    mu, resid_std, training_rows = _ridge_fit_predict(x_train, y_train, x_now, alpha=float(settings.get("horizon_ridge_alpha", 2.0)))
     returns = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
     sigma = resid_std if math.isfinite(float(resid_std)) and float(resid_std) > 0 else _fallback_sigma(returns, steps)
     sigma = max(float(sigma), 1e-6)
@@ -198,17 +240,11 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
     down_move = max(price - lower, 0.0)
     ev_buy = p_up * up_move - p_down * down_move - cost_points
     ev_sell = p_down * down_move - p_up * up_move - cost_points
-
-    prob_gap = float(settings.get("horizon_min_probability_gap", 0.06))
-    if p_up > p_down + prob_gap:
-        bias = "bullish"
-    elif p_down > p_up + prob_gap:
-        bias = "bearish"
-    else:
-        bias = "mixed"
+    bias = _bias_from_probs(p_up, p_down, settings, mode)
 
     return {
         "horizon": label,
+        "role": role,
         "status": "ok",
         "bias": bias,
         "up_probability": round(p_up * 100.0, 1),
@@ -219,23 +255,20 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
         "expected_high": round(upper, 2),
         "ev_buy_points": round(ev_buy, 2),
         "ev_sell_points": round(ev_sell, 2),
-        "min_ev_points": round(min_ev, 2),
-        "decision": _decision(label, p_up, p_down, ev_buy, ev_sell, settings),
+        "min_ev_points": round(min_ev, 2) if mode == "entry" else None,
+        "decision": _decision(label, role, mode, p_up, p_down, ev_buy, ev_sell, settings),
         "expiry": label,
         "training_rows": training_rows,
-        "method": "rolling ridge return + residual volatility + EV threshold",
+        "method": "rolling ridge return + residual volatility; 5m signal, higher horizons filter only",
     }
 
 
 def build_multi_horizon_forecast(df: pd.DataFrame, settings: dict) -> list[dict]:
-    """Build formula-based 5m/15m/30m/1h forecasts from enriched OHLC data.
-
-    The model is trained on the currently loaded historical bars during the scan. It is
-    not a fixed rule score: targets are forward log-returns for each horizon.
-    """
+    """Build formula-based 5m signal plus 1h/4h/Daily filters from enriched OHLC data."""
     if df is None or df.empty or len(df) < 120:
         return [{
             "horizon": label,
+            "role": config["role"],
             "status": "insufficient_data",
             "bias": "N/A",
             "up_probability": None,
@@ -246,12 +279,12 @@ def build_multi_horizon_forecast(df: pd.DataFrame, settings: dict) -> list[dict]
             "expected_high": None,
             "ev_buy_points": None,
             "ev_sell_points": None,
-            "min_ev_points": _min_ev_points(label, settings),
+            "min_ev_points": _min_ev_points(label, settings) if config["mode"] == "entry" else None,
             "decision": "Need more clean bars",
             "expiry": label,
             "training_rows": 0,
-            "method": "rolling ridge return + residual volatility + EV threshold",
-        } for label in HORIZONS_MINUTES]
+            "method": "rolling ridge return + residual volatility; 5m signal, higher horizons filter only",
+        } for label, config in HORIZON_CONFIG.items()]
 
-    features = _feature_frame(df)
-    return [_forecast_one(df, features, settings, label, minutes) for label, minutes in HORIZONS_MINUTES.items()]
+    features = _feature_frame(df, settings)
+    return [_forecast_one(df, features, settings, label, config) for label, config in HORIZON_CONFIG.items()]
