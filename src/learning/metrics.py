@@ -11,10 +11,22 @@ def load_outcomes(store: GitHubLearningStore | None = None, max_files: int = 500
     if not store.enabled:
         return []
     outcomes: list[dict] = []
+
     for path in store.list_json_files("learning/outcomes", max_files=max_files):
         item = store.read_json(path)
         if item:
             outcomes.append(item)
+
+    # Historical backfill is stored as batch files to avoid hundreds of tiny GitHub commits.
+    for path in store.list_json_files("learning/backfills", max_files=max(20, max_files // 5)):
+        batch = store.read_json(path)
+        if not batch:
+            continue
+        batch_outcomes = batch.get("outcomes") if isinstance(batch, dict) else None
+        if isinstance(batch_outcomes, list):
+            outcomes.extend([item for item in batch_outcomes if isinstance(item, dict)])
+        elif isinstance(batch, dict) and batch.get("horizon"):
+            outcomes.append(batch)
     return outcomes
 
 
@@ -62,7 +74,7 @@ def compute_learning_metrics(outcomes: list[dict]) -> list[dict]:
 
 
 def learning_report_markdown(metrics: list[dict]) -> str:
-    lines = ["# XAU/USD Learning Report", "", "Generated from completed prediction outcomes.", ""]
+    lines = ["# XAU/USD Learning Report", "", "Generated from completed prediction outcomes and historical backfill batches.", ""]
     if not metrics:
         lines.append("No completed outcomes yet.")
         return "\n".join(lines) + "\n"
