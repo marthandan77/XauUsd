@@ -64,8 +64,10 @@ def _summary(
 def kc_squeeze_summary(df: pd.DataFrame, settings: dict) -> dict:
     """Return a KC Squeeze state-machine summary from already-enriched OHLCV data.
 
-    Release detection is separated from trade qualification. A raw release is context;
-    confirmed direction plus clean veto filters are required before a trade plan.
+    State names intentionally match regime/veto naming:
+    compression, squeeze_release_now, squeeze_release_recent, squeeze_release_expired,
+    bullish_release_confirmed, bearish_release_confirmed, bullish_release_overextended,
+    bearish_release_overextended, bullish_momentum, bearish_momentum, mixed.
     """
     empty_row = pd.Series(dtype="object")
     if df is None or df.empty or len(df) < 3:
@@ -185,7 +187,7 @@ def kc_squeeze_summary(df: pd.DataFrame, settings: dict) -> dict:
 
     if squeeze_fired:
         return _summary(
-            state="release_fired_now",
+            state="squeeze_release_now",
             bias="neutral",
             action_hint="WAIT",
             confidence_boost=8,
@@ -199,7 +201,7 @@ def kc_squeeze_summary(df: pd.DataFrame, settings: dict) -> dict:
 
     if squeeze_recent:
         return _summary(
-            state="release_recent_unconfirmed",
+            state="squeeze_release_recent",
             bias="neutral",
             action_hint="WAIT",
             confidence_boost=6,
@@ -239,7 +241,7 @@ def kc_squeeze_summary(df: pd.DataFrame, settings: dict) -> dict:
                 previous_momentum=previous_momentum,
             )
         return _summary(
-            state="release_expired",
+            state="squeeze_release_expired",
             bias="neutral",
             action_hint="HOLD",
             confidence_boost=0,
