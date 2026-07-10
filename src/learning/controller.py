@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from src.gate_diagnostics import build_gate_breakdown, signal_stage, summarize_gate_blockers
+
 from .backfill import backfill_learning_history as _backfill_learning_history
 from .github_store import GitHubLearningStore
 from .metrics import build_metrics_payload
 from .outcome_evaluator import evaluate_due_predictions
 from .prediction_logger import log_prediction
-from .tuner import generate_challenger_from_bars
 
 
 def run_learning_cycle(result: dict) -> dict:
@@ -14,6 +15,11 @@ def run_learning_cycle(result: dict) -> dict:
     This function must never block trading decisions. It returns status instead of raising
     whenever the GitHub learning store is not configured.
     """
+    if result and result.get("ok"):
+        result["signal_stage"] = signal_stage(result)
+        result["gate_breakdown"] = build_gate_breakdown(result)
+        result["gate_summary"] = summarize_gate_blockers(result)
+
     store = GitHubLearningStore.from_runtime()
     status = {"store": store.status()}
     if not store.enabled:
@@ -26,6 +32,9 @@ def run_learning_cycle(result: dict) -> dict:
     return {
         "ok": True,
         "store": store.status(),
+        "signal_stage": result.get("signal_stage") if result else None,
+        "gate_summary": result.get("gate_summary") if result else None,
+        "gate_breakdown": result.get("gate_breakdown") if result else [],
         "log": log_status,
         "evaluation": eval_status,
         "metrics": metrics_status,
@@ -38,10 +47,17 @@ def refresh_learning_metrics() -> dict:
 
 
 def generate_challenger(result: dict) -> dict:
-    store = GitHubLearningStore.from_runtime()
-    if not result or not result.get("ok"):
-        return {"ok": False, "reason": "Run SCAN NOW before generating a challenger."}
-    return generate_challenger_from_bars(result.get("bars"), result.get("settings", {}), store)
+    """Disabled by design.
+
+    We removed automatic challenger/recommended settings because it encourages overfitting
+    to recent backfill/live samples. The new direction is diagnostics-first: freeze the
+    champion settings, inspect gate failures, then change one hypothesis at a time.
+    """
+    return {
+        "ok": False,
+        "reason": "Challenger/recommended settings generation is disabled to reduce overfitting.",
+        "new_direction": "Use gate breakdown, fixed champion settings, and out-of-sample validation before any setting change.",
+    }
 
 
 def backfill_learning_history(result: dict) -> dict:
@@ -70,6 +86,10 @@ def _install_sidebar_backfill_button() -> None:
     original = getattr(current, "_xau_original_button", current)
 
     def patched_button(self, label, *args, **kwargs):
+        if label == "Generate challenger settings":
+            self.info("Challenger/recommended settings generation has been removed to reduce overfitting. Use gate breakdown and fixed champion settings instead.")
+            return False
+
         clicked = original(self, label, *args, **kwargs)
         if label == "Apply" and kwargs.get("key") == "settings_apply_button":
             result = st.session_state.get("last_scan_result")
