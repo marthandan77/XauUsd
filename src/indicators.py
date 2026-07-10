@@ -4,12 +4,28 @@ import numpy as np
 import pandas as pd
 
 
+VWAP_WINDOW_BY_INTERVAL = {
+    "5m": 288,
+    "15m": 96,
+    "30m": 48,
+    "1h": 24,
+    "4h": 18,
+    "1d": 20,
+}
+
+
 def _to_int(settings: dict, key: str, default: int) -> int:
     return max(int(settings.get(key, default)), 1)
 
 
 def _to_float(settings: dict, key: str, default: float) -> float:
     return float(settings.get(key, default))
+
+
+def _rolling_vwap_window(settings: dict) -> int:
+    if "vwap_window_bars" in settings:
+        return max(int(settings.get("vwap_window_bars", 96)), 5)
+    return VWAP_WINDOW_BY_INTERVAL.get(str(settings.get("price_interval", "15m")), 96)
 
 
 def sma(series: pd.Series, length: int) -> pd.Series:
@@ -102,7 +118,12 @@ def add_indicators(bars: pd.DataFrame, settings: dict) -> pd.DataFrame:
 
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
     volume = df["volume"].replace(0, 1).fillna(1)
-    df["vwap"] = (typical * volume).cumsum() / volume.cumsum()
+    rolling_window = _rolling_vwap_window(settings)
+    min_periods = max(min(rolling_window, 20), 5)
+    rolling_notional = (typical * volume).rolling(rolling_window, min_periods=min_periods).sum()
+    rolling_volume = volume.rolling(rolling_window, min_periods=min_periods).sum().replace(0, np.nan)
+    cumulative_vwap = (typical * volume).cumsum() / volume.cumsum()
+    df["vwap"] = (rolling_notional / rolling_volume).fillna(cumulative_vwap)
 
     df["tr"] = true_range(df)
     df["atr"] = atr(df, atr_period)
