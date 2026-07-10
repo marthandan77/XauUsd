@@ -294,7 +294,7 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     interval_options = ["5m", "15m", "30m", "1h", "4h", "1d"]
     if st.session_state.get(_control_key("price_interval")) not in interval_options:
         st.session_state[_control_key("price_interval")] = str(settings.get("price_interval", "15m"))
-    period_options = ["7d", "30d", "60d", "6mo", "1y", "2y"]
+    period_options = ["7d", "14d", "30d", "60d", "6mo", "1y", "2y"]
     if st.session_state.get(_control_key("price_period")) not in period_options:
         st.session_state[_control_key("price_period")] = str(settings.get("price_period", "30d"))
 
