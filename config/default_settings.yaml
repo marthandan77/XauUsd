@@ -4,7 +4,7 @@ twelve_data_symbol: XAU/USD
 timezone: Asia/Singapore
 twelve_data_outputsize: 5000
 minimum_bars: 500
-price_interval: 15m
+price_interval: 5m
 price_period: 30d
 lookback_days: 7
 ema_fast: 50
@@ -56,3 +56,10 @@ kc_compression_score: 3
 realized_vol_length: 100
 show_bollinger_bands: true
 show_keltner_channels: true
+require_horizon_alignment: true
+horizon_model_lookback_bars: 3000
+horizon_ridge_alpha: 2.0
+horizon_min_probability_gap: 0.06
+filter_min_probability_gap: 0.08
+horizon_cost_points: 0.30
+stale_candle_multiplier: 2.0
