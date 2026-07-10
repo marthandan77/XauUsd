@@ -23,6 +23,13 @@ INTERVAL_MINUTES = {
     "1d": 1440,
 }
 
+DEFAULT_MIN_EV_POINTS = {
+    "5m": 0.50,
+    "15m": 0.80,
+    "30m": 1.20,
+    "1h": 1.80,
+}
+
 
 def _safe_float(value, default: float = 0.0) -> float:
     try:
@@ -39,10 +46,7 @@ def _norm_cdf(x: float) -> float:
 
 
 def _ridge_fit_predict(x_train: np.ndarray, y_train: np.ndarray, x_now: np.ndarray, alpha: float = 1.0) -> tuple[float, float, int]:
-    """Fit a small ridge model with closed-form linear algebra and predict the latest row.
-
-    Returns predicted log-return, residual standard deviation, and training row count.
-    """
+    """Fit a small ridge model with closed-form linear algebra and predict the latest row."""
     valid = np.isfinite(y_train) & np.isfinite(x_train).all(axis=1)
     x_train = x_train[valid]
     y_train = y_train[valid]
@@ -117,12 +121,21 @@ def _fallback_sigma(returns: pd.Series, steps: int) -> float:
     return float(base) * math.sqrt(max(steps, 1))
 
 
-def _decision(p_up: float, p_down: float, ev_buy: float, ev_sell: float, settings: dict) -> str:
+def _min_ev_points(label: str, settings: dict) -> float:
+    override_key = f"min_ev_points_{label}"
+    if override_key in settings:
+        return float(settings.get(override_key, DEFAULT_MIN_EV_POINTS.get(label, 0.8)))
+    return float(settings.get("min_ev_points", DEFAULT_MIN_EV_POINTS.get(label, 0.8)))
+
+
+def _decision(label: str, p_up: float, p_down: float, ev_buy: float, ev_sell: float, settings: dict) -> str:
     if bool(settings.get("signals_disabled", False)):
         return "Disabled - sample data"
-    if p_up > p_down and ev_buy > 0:
+    min_ev = _min_ev_points(label, settings)
+    prob_gap = float(settings.get("horizon_min_probability_gap", 0.06))
+    if p_up >= p_down + prob_gap and ev_buy >= min_ev:
         return "Buy edge"
-    if p_down > p_up and ev_sell > 0:
+    if p_down >= p_up + prob_gap and ev_sell >= min_ev:
         return "Sell edge"
     if max(p_up, p_down) >= 0.55:
         return "Watch"
@@ -133,6 +146,7 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
     interval = str(settings.get("price_interval", "5m"))
     base_minutes = INTERVAL_MINUTES.get(interval, 5)
     price = _safe_float(df["close"].iloc[-1], 0.0)
+    min_ev = _min_ev_points(label, settings)
 
     if base_minutes > horizon_minutes or horizon_minutes % base_minutes != 0:
         return {
@@ -147,6 +161,7 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
             "expected_high": None,
             "ev_buy_points": None,
             "ev_sell_points": None,
+            "min_ev_points": min_ev,
             "decision": f"Use {base_minutes}m base or switch to 5m timeframe",
             "expiry": label,
             "training_rows": 0,
@@ -184,9 +199,10 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
     ev_buy = p_up * up_move - p_down * down_move - cost_points
     ev_sell = p_down * down_move - p_up * up_move - cost_points
 
-    if p_up > p_down + 0.03:
+    prob_gap = float(settings.get("horizon_min_probability_gap", 0.06))
+    if p_up > p_down + prob_gap:
         bias = "bullish"
-    elif p_down > p_up + 0.03:
+    elif p_down > p_up + prob_gap:
         bias = "bearish"
     else:
         bias = "mixed"
@@ -203,10 +219,11 @@ def _forecast_one(df: pd.DataFrame, features: pd.DataFrame, settings: dict, labe
         "expected_high": round(upper, 2),
         "ev_buy_points": round(ev_buy, 2),
         "ev_sell_points": round(ev_sell, 2),
-        "decision": _decision(p_up, p_down, ev_buy, ev_sell, settings),
+        "min_ev_points": round(min_ev, 2),
+        "decision": _decision(label, p_up, p_down, ev_buy, ev_sell, settings),
         "expiry": label,
         "training_rows": training_rows,
-        "method": "rolling ridge return + residual volatility",
+        "method": "rolling ridge return + residual volatility + EV threshold",
     }
 
 
@@ -229,10 +246,11 @@ def build_multi_horizon_forecast(df: pd.DataFrame, settings: dict) -> list[dict]
             "expected_high": None,
             "ev_buy_points": None,
             "ev_sell_points": None,
+            "min_ev_points": _min_ev_points(label, settings),
             "decision": "Need more clean bars",
             "expiry": label,
             "training_rows": 0,
-            "method": "rolling ridge return + residual volatility",
+            "method": "rolling ridge return + residual volatility + EV threshold",
         } for label in HORIZONS_MINUTES]
 
     features = _feature_frame(df)
