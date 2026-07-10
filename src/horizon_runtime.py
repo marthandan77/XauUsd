@@ -22,6 +22,7 @@ def _rows_from_forecasts(forecasts: list[dict]) -> list[dict]:
                 "Expected high": item.get("expected_high"),
                 "EV buy": item.get("ev_buy_points"),
                 "EV sell": item.get("ev_sell_points"),
+                "Min EV": item.get("min_ev_points"),
                 "Decision": item.get("decision"),
                 "Expiry": item.get("expiry"),
                 "Training rows": item.get("training_rows"),
@@ -56,6 +57,7 @@ def _patch_streamlit_subheader() -> None:
                 st.dataframe(pd.DataFrame(_rows_from_forecasts(forecasts)), use_container_width=True, hide_index=True)
                 st.caption(
                     "Formula engine: rolling ridge regression on forward log returns plus residual volatility range. "
+                    "Final trade permission requires 15m/30m agreement and EV above threshold. "
                     "Use 5m timeframe for exact 5m/15m/30m/1h horizons. Probabilities are model estimates, not guarantees."
                 )
                 st.session_state["_xauusd_multi_horizon_rendered_id"] = scan_id
@@ -94,6 +96,7 @@ def store_multi_horizon_for_streamlit(df, settings: dict) -> None:
                 "expected_high": None,
                 "ev_buy_points": None,
                 "ev_sell_points": None,
+                "min_ev_points": None,
                 "decision": f"Forecast error: {exc}",
                 "expiry": "N/A",
                 "training_rows": 0,
