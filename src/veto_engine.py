@@ -79,6 +79,8 @@ def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settin
 
     if bool(settings.get("signals_disabled", False)) and action in ACTIONABLE_PLANS:
         reasons.append(str(settings.get("signals_disabled_reason", "signals disabled")))
+    if bool(row.get("data_stale", False)) and action in ACTIONABLE_PLANS:
+        reasons.append("latest candle is stale; live scalp entry blocked")
     if macro.get("blocked"):
         reasons.append("event block active")
     if regime == "shock":
