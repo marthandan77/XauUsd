@@ -126,6 +126,17 @@ def _bars_per_day(interval: str) -> int:
     }.get(str(interval), 96)
 
 
+def _interval_minutes(interval: str) -> int:
+    return {
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "4h": 240,
+        "1d": 1440,
+    }.get(str(interval), 15)
+
+
 def _outputsize(settings: dict) -> int:
     interval = str(settings.get("price_interval", "15m"))
     period = str(settings.get("price_period", "30d"))
@@ -133,6 +144,22 @@ def _outputsize(settings: dict) -> int:
     minimum = int(settings.get("minimum_bars", 500))
     maximum = int(settings.get("twelve_data_outputsize", 5000))
     return max(min(requested, maximum), minimum)
+
+
+def _mark_stale_if_needed(bars: pd.DataFrame, settings: dict) -> tuple[pd.DataFrame, str]:
+    if bars.empty:
+        return bars, ""
+    df = bars.copy()
+    df["data_stale"] = False
+    interval = str(settings.get("price_interval", "15m"))
+    allowed_minutes = float(settings.get("stale_candle_multiplier", 2.0)) * _interval_minutes(interval)
+    latest = pd.to_datetime(df.index[-1])
+    now = pd.Timestamp.now(tz=latest.tz) if latest.tzinfo is not None else pd.Timestamp.utcnow().tz_localize(None)
+    age_minutes = (now - latest).total_seconds() / 60.0
+    if age_minutes > allowed_minutes:
+        df.loc[df.index[-1], "data_stale"] = True
+        return df, f"Latest candle is stale: {age_minutes:.1f} minutes old on {interval} timeframe. No fresh scalp entry should be allowed."
+    return df, ""
 
 
 def load_twelve_data_bars(settings: dict) -> FeedResult:
@@ -162,7 +189,11 @@ def load_twelve_data_bars(settings: dict) -> FeedResult:
         bars = normalize_ohlc(bars)
         if bars.empty:
             return FeedResult(pd.DataFrame(), "twelvedata:none", f"Twelve Data returned no bars for {symbol}")
-        return FeedResult(bars, f"twelvedata:{symbol}", "")
+        bars, stale_warning = _mark_stale_if_needed(bars, settings)
+        source = f"twelvedata:{symbol}"
+        if stale_warning:
+            source = f"twelvedata:stale:{symbol}"
+        return FeedResult(bars, source, stale_warning)
     except Exception as exc:
         return FeedResult(pd.DataFrame(), "twelvedata:error", f"Twelve Data request failed: {exc}")
 
@@ -173,4 +204,5 @@ def load_live_bars(settings: dict) -> FeedResult:
 
 def load_csv(uploaded_file) -> FeedResult:
     bars = normalize_ohlc(pd.read_csv(uploaded_file))
+    bars["data_stale"] = False
     return FeedResult(bars, "uploaded_csv", "")
