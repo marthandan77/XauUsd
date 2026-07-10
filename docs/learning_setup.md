@@ -30,10 +30,16 @@ Prediction events:
 learning/predictions/YYYY-MM-DD/<scan_id>.json
 ```
 
-Outcome events:
+Outcome events from live scans:
 
 ```text
 learning/outcomes/YYYY-MM-DD/<scan_id>_<horizon>.json
+```
+
+Historical backfill batches:
+
+```text
+learning/backfills/YYYY-MM-DD/backfill_<timestamp>.json
 ```
 
 Challenger settings:
@@ -47,8 +53,10 @@ learning/reports/latest_learning_report.md
 
 1. Press `SCAN NOW`.
 2. The app logs the current prediction to GitHub.
-3. On later scans, expired predictions are evaluated against real market data.
-4. Open the `Learning` page to refresh outcome metrics.
-5. Use `Generate challenger settings` to create a manually reviewable challenger config.
+3. The sidebar `Backfill Learning History` button becomes enabled after a valid scan.
+4. Press `Backfill Learning History` to generate historical walk-forward outcome samples from the latest loaded bars.
+5. On later scans, expired live predictions are evaluated against real market data.
+6. Open the `Learning` page to refresh outcome metrics.
+7. Use `Generate challenger settings` to create a manually reviewable challenger config.
 
 Live settings are not overwritten automatically.
