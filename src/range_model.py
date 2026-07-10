@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 
+BULLISH_EXTENSION_REGIMES = {"bull_trend", "bullish_squeeze_breakout", "bullish_release_confirmed"}
+BEARISH_EXTENSION_REGIMES = {"bear_trend", "bearish_squeeze_breakout", "bearish_release_confirmed"}
+
+
 def price_bands(market, regime: str) -> dict:
     price = float(market.price)
     atr = float(market.atr)
@@ -13,12 +17,12 @@ def price_bands(market, regime: str) -> dict:
         "session_high": price + 1.80 * atr,
         "note": "ATR bands",
     }
-    if regime in {"bull_trend", "bullish_squeeze_breakout"}:
+    if regime in BULLISH_EXTENSION_REGIMES:
         bands["one_hour_high"] += 0.25 * atr
         bands["four_hour_high"] += 0.50 * atr
         bands["session_high"] += 0.75 * atr
         bands["note"] = "upper band extended"
-    elif regime in {"bear_trend", "bearish_squeeze_breakout"}:
+    elif regime in BEARISH_EXTENSION_REGIMES:
         bands["one_hour_low"] -= 0.25 * atr
         bands["four_hour_low"] -= 0.50 * atr
         bands["session_low"] -= 0.75 * atr
