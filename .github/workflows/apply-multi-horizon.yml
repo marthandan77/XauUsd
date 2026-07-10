@@ -1,9 +1,6 @@
 name: Apply multi-horizon forecast patch
 
-on:
-  push:
-    paths:
-      - '.github/workflows/apply-multi-horizon.yml'
+on: push
 
 permissions:
   contents: write
@@ -123,6 +120,6 @@ def render_multi_horizon_forecast(result: dict) -> None:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app.py src/market_map.py src/range_model.py sitecustomize.py .github/workflows/patch-lookback-option.yml .github/workflows/apply-multi-horizon.yml
+          git add -A
           git diff --cached --quiet || git commit -m "Show multi-horizon predictors after scan"
           git push
