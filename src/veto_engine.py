@@ -21,13 +21,10 @@ def _finite_float(value, default: float | None = None):
     return number
 
 
-def _horizon_map() -> dict[str, dict]:
-    try:
-        import streamlit as st
-    except Exception:
+def _horizon_map(multi_horizon: list[dict] | None) -> dict[str, dict]:
+    if not multi_horizon:
         return {}
-    forecasts = st.session_state.get("_xauusd_multi_horizon_forecasts") or []
-    return {str(item.get("horizon")): item for item in forecasts if isinstance(item, dict)}
+    return {str(item.get("horizon")): item for item in multi_horizon if isinstance(item, dict)}
 
 
 def _ev_ok(item: dict, side: str) -> bool:
@@ -50,13 +47,13 @@ def _strongly_opposite(item: dict, action: str) -> bool:
     return False
 
 
-def _add_horizon_alignment_veto(action: str, reasons: list[str], settings: dict) -> None:
+def _add_horizon_alignment_veto(action: str, reasons: list[str], settings: dict, multi_horizon: list[dict] | None) -> None:
     if action not in ACTIONABLE_PLANS:
         return
     if not bool(settings.get("require_horizon_alignment", True)):
         return
 
-    horizons = _horizon_map()
+    horizons = _horizon_map(multi_horizon)
     h5 = horizons.get("5m")
     if not h5 or h5.get("status") != "ok":
         reasons.append("5m signal forecast unavailable; cannot confirm scalp timing")
@@ -81,7 +78,16 @@ def _add_horizon_alignment_veto(action: str, reasons: list[str], settings: dict)
             reasons.append(f"{label} filter is opposite to the trade direction")
 
 
-def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settings: dict, row: dict | None = None) -> dict:
+def apply_veto(
+    action: str,
+    plan: dict,
+    market,
+    regime: str,
+    macro: dict,
+    settings: dict,
+    row: dict | None = None,
+    multi_horizon: list[dict] | None = None,
+) -> dict:
     reasons: list[str] = []
     row = row or {}
 
@@ -132,7 +138,7 @@ def apply_veto(action: str, plan: dict, market, regime: str, macro: dict, settin
         if risk > float(settings.get("max_sl_atr_fraction", 3.5)) * atr:
             reasons.append("stop too wide")
 
-    _add_horizon_alignment_veto(action, reasons, settings)
+    _add_horizon_alignment_veto(action, reasons, settings, multi_horizon)
 
     if reasons and action in ACTIONABLE_PLANS:
         return {"final_action": "HOLD", "trade_quality": "Rejected", "reasons": reasons, "room_ratio": rr}
