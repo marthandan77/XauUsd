@@ -11,6 +11,7 @@ import yaml
 from src.ai_explainer import explain
 from src.data_feed import FeedResult, load_csv, load_live_bars, make_sample_bars
 from src.forecast_engine import choose_action, score_forecast
+from src.horizon_forecast import build_multi_horizon_forecast
 from src.indicators import add_indicators
 from src.kc_squeeze_engine import kc_squeeze_summary
 from src.macro_engine import macro_context
@@ -23,6 +24,7 @@ from src.veto_engine import apply_veto
 ROOT = Path(__file__).resolve().parent
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
 CONTROL_PREFIX = "control_"
+
 PERSISTED_SETTING_KEYS = [
     "price_interval",
     "price_period",
@@ -54,6 +56,13 @@ PERSISTED_SETTING_KEYS = [
     "show_bollinger_bands",
     "show_keltner_channels",
     "news_block_manual",
+    "require_horizon_alignment",
+    "horizon_model_lookback_bars",
+    "horizon_ridge_alpha",
+    "horizon_min_probability_gap",
+    "filter_min_probability_gap",
+    "horizon_cost_points",
+    "stale_candle_multiplier",
 ]
 
 st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
@@ -66,9 +75,14 @@ def load_yaml(path: Path) -> dict:
 
 
 def _sample_freq(settings: dict) -> str:
-    return {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
-        str(settings.get("price_interval", "15m")), "15min"
-    )
+    return {
+        "5m": "5min",
+        "15m": "15min",
+        "30m": "30min",
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1d",
+    }.get(str(settings.get("price_interval", "5m")), "5min")
 
 
 def _control_key(key: str) -> str:
@@ -228,7 +242,15 @@ def plan_value(plan: dict, key: str):
 
 def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
     if bool(settings.get("signals_disabled", False)):
-        return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "Signals disabled until real data is active."}, ""
+        return "NO CANDIDATE", {
+            "entry_zone_low": None,
+            "entry_zone_high": None,
+            "stop": None,
+            "tp1": None,
+            "tp2": None,
+            "risk": 0.0,
+            "note": "Signals disabled until real data is active.",
+        }, ""
 
     threshold = int(settings.get("forecast_threshold", 65))
     bias = str(scores.get("bias", "mixed"))
@@ -236,7 +258,15 @@ def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[st
     bear_score = int(scores.get("bear_score", 0))
 
     if bool(scores.get("force_wait", False)):
-        return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": scores.get("wait_reason", "Waiting for confirmation.")}, ""
+        return "NO CANDIDATE", {
+            "entry_zone_low": None,
+            "entry_zone_high": None,
+            "stop": None,
+            "tp1": None,
+            "tp2": None,
+            "risk": 0.0,
+            "note": scores.get("wait_reason", "Waiting for confirmation."),
+        }, ""
 
     if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
         plan = build_trade_plan("BUY PLAN", market, settings)
@@ -253,10 +283,18 @@ def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[st
         plan["note"] = "Bearish preview only. Short plans are disabled, so this is not an active SELL PLAN."
         return "SELL PREVIEW ONLY", plan, "Seller pressure is developing, but this is not an active sell signal."
 
-    return "NO CANDIDATE", {"entry_zone_low": None, "entry_zone_high": None, "stop": None, "tp1": None, "tp2": None, "risk": 0.0, "note": "No active trade plan. Wait for a cleaner case."}, ""
+    return "NO CANDIDATE", {
+        "entry_zone_low": None,
+        "entry_zone_high": None,
+        "stop": None,
+        "tp1": None,
+        "tp2": None,
+        "risk": 0.0,
+        "note": "No active trade plan. Wait for a cleaner case.",
+    }, ""
 
 
-def plan_status(action: str, final_action: str, plan: dict, candidate_action: str, candidate_note: str) -> str:
+def plan_status(action: str, final_action: str, plan: dict, candidate_action: str) -> str:
     if final_action == "BUY PLAN":
         return "Buy allowed"
     if final_action == "SELL PLAN":
@@ -293,14 +331,13 @@ def settings_panel(settings: dict, presets: dict) -> dict:
 
     interval_options = ["5m", "15m", "30m", "1h", "4h", "1d"]
     if st.session_state.get(_control_key("price_interval")) not in interval_options:
-        st.session_state[_control_key("price_interval")] = str(settings.get("price_interval", "15m"))
+        st.session_state[_control_key("price_interval")] = str(settings.get("price_interval", "5m"))
     period_options = ["7d", "14d", "30d", "60d", "6mo", "1y", "2y"]
     if st.session_state.get(_control_key("price_period")) not in period_options:
         st.session_state[_control_key("price_period")] = str(settings.get("price_period", "30d"))
 
     st.sidebar.selectbox("Timeframe", interval_options, key=_control_key("price_interval"))
     st.sidebar.selectbox("Lookback period", period_options, key=_control_key("price_period"))
-
     st.sidebar.slider("Bull threshold", 50, 95, key=_control_key("buy_threshold"))
     st.sidebar.slider("Bear threshold", 50, 95, key=_control_key("sell_threshold"))
     st.sidebar.slider("Watch threshold", 40, 90, key=_control_key("wait_threshold"))
@@ -322,7 +359,6 @@ def settings_panel(settings: dict, presets: dict) -> dict:
 
     st.sidebar.header("Trade plan")
     st.sidebar.slider("ATR stop multiplier", 0.8, 5.0, step=0.1, key=_control_key("atr_stop_multiplier"))
-    st.sidebar.slider("Legacy ATR take-profit multiplier", 1.0, 10.0, step=0.1, key=_control_key("atr_tp_multiplier"))
     st.sidebar.slider("Buy Take Profit 1 ATR", 0.50, 5.00, step=0.05, key=_control_key("buy_tp1_atr_multiplier"))
     st.sidebar.slider("Buy Take Profit 2 ATR", 0.75, 8.00, step=0.05, key=_control_key("buy_tp2_atr_multiplier"))
     st.sidebar.slider("Sell Take Profit 1 ATR", 0.50, 5.00, step=0.05, key=_control_key("sell_tp1_atr_multiplier"))
@@ -330,6 +366,16 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     st.sidebar.slider("Minimum TP1 distance ATR", 0.25, 3.00, step=0.05, key=_control_key("min_tp1_atr_distance"))
     st.sidebar.slider("Sell support buffer ATR", 0.00, 1.00, step=0.05, key=_control_key("sell_support_buffer_atr"))
     st.sidebar.slider("Advisory risk %", 0.1, 2.0, step=0.1, key=_control_key("risk_per_trade_pct"))
+
+    st.sidebar.header("Horizon gate")
+    st.sidebar.toggle("Require horizon alignment", key=_control_key("require_horizon_alignment"))
+    st.sidebar.slider("Model lookback bars", 500, 5000, step=100, key=_control_key("horizon_model_lookback_bars"))
+    st.sidebar.slider("Ridge alpha", 0.1, 10.0, step=0.1, key=_control_key("horizon_ridge_alpha"))
+    st.sidebar.slider("5m probability gap", 0.01, 0.20, step=0.01, key=_control_key("horizon_min_probability_gap"))
+    st.sidebar.slider("Filter probability gap", 0.01, 0.25, step=0.01, key=_control_key("filter_min_probability_gap"))
+    st.sidebar.slider("Assumed cost points", 0.0, 3.0, step=0.05, key=_control_key("horizon_cost_points"))
+    st.sidebar.slider("Stale candle multiplier", 1.0, 5.0, step=0.5, key=_control_key("stale_candle_multiplier"))
+
     st.sidebar.caption("BUY and SELL plan processing is always enabled.")
     st.sidebar.toggle("Show Bollinger Bands", key=_control_key("show_bollinger_bands"))
     st.sidebar.toggle("Show Keltner Channels", key=_control_key("show_keltner_channels"))
@@ -361,7 +407,7 @@ def data_panel(settings: dict) -> dict:
             "Twelve Data API key - optional local session override",
             value="",
             type="password",
-            help="Use this only if Streamlit cannot see your Windows environment variable. The key is not saved to GitHub.",
+            help="Use this only if Streamlit cannot see your environment variable. The key is not saved to GitHub.",
             key="twelve_data_runtime_key",
         )
         if key_input.strip():
@@ -403,8 +449,10 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
             "feed": feed,
             "settings": safe_settings(scan_settings),
             "scan_time": pd.Timestamp.now(tz="Asia/Singapore"),
+            "multi_horizon": [],
         }
 
+    multi_horizon = build_multi_horizon_forecast(bars, scan_settings)
     kc = kc_squeeze_summary(bars, scan_settings)
     latest_row = bars.iloc[-1].to_dict()
     latest_row["kc_state"] = kc["state"]
@@ -417,14 +465,15 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
     if kc["state"] != "insufficient_data":
         scores["kc_state"] = kc["state"]
         scores["kc_reason"] = kc["reason"]
+
     action = choose_action(scores, scan_settings)
     plan = build_trade_plan(action, market, scan_settings)
     candidate_action, candidate_plan, candidate_note = candidate_plan_from_scores(scores, market, scan_settings)
     bands = price_bands(market, regime)
-    veto = apply_veto(action, plan, market, regime, macro, scan_settings, latest_row)
+    veto = apply_veto(action, plan, market, regime, macro, scan_settings, latest_row, multi_horizon)
     summary = explain(regime, scores, veto, market, macro)
     active_plan = veto["final_action"] in ACTIONABLE
-    status = plan_status(action, veto["final_action"], plan, candidate_action, candidate_note)
+    status = plan_status(action, veto["final_action"], plan, candidate_action)
     display_plan = plan if has_plan_levels(plan) else candidate_plan
 
     advisory_qty = 0.0
@@ -460,6 +509,7 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
         "status": status,
         "display_plan": display_plan,
         "advisory_qty": advisory_qty,
+        "multi_horizon": multi_horizon,
     }
 
 
@@ -639,8 +689,6 @@ def build_simple_market_case(result: dict) -> dict:
         "next_lines": next_lines,
         "buyer_strength": bull,
         "seller_strength": bear,
-        "room_quality": room,
-        "price_location": location,
     }
 
 
@@ -667,6 +715,42 @@ def render_simple_case_panel(result: dict) -> None:
     st.subheader("What to wait for")
     for line in case["next_lines"]:
         st.write(f"- {line}")
+
+
+def _horizon_rows(forecasts: list[dict]) -> list[dict]:
+    rows = []
+    for item in forecasts or []:
+        rows.append({
+            "Horizon": item.get("horizon"),
+            "Role": item.get("role"),
+            "Bias": item.get("bias"),
+            "Up %": item.get("up_probability"),
+            "Down %": item.get("down_probability"),
+            "Flat %": item.get("flat_probability"),
+            "Expected return %": item.get("expected_return_pct"),
+            "Expected low": item.get("expected_low"),
+            "Expected high": item.get("expected_high"),
+            "EV buy": item.get("ev_buy_points"),
+            "EV sell": item.get("ev_sell_points"),
+            "Min EV": item.get("min_ev_points"),
+            "Decision": item.get("decision"),
+            "Training rows": item.get("training_rows"),
+            "Status": item.get("status"),
+        })
+    return rows
+
+
+def render_multi_horizon_panel(result: dict) -> None:
+    st.subheader("5m Signal + 1h / 4h / Daily Filters")
+    forecasts = result.get("multi_horizon") or []
+    if not forecasts:
+        st.info("Multi-horizon output is unavailable for this scan.")
+        return
+    st.dataframe(pd.DataFrame(_horizon_rows(forecasts)), use_container_width=True, hide_index=True)
+    st.caption(
+        "Processing path: run_strategy_scan → build_multi_horizon_forecast → apply_veto. "
+        "5m is the entry signal. 1h, 4h, and Daily are filters only. Probabilities are model estimates, not guarantees."
+    )
 
 
 def render_trade_levels(result: dict) -> None:
@@ -730,6 +814,7 @@ def render_forecast_manager(result: dict) -> None:
         st.error(result.get("error", "Scan failed."))
         return
     render_simple_case_panel(result)
+    render_multi_horizon_panel(result)
     render_trade_levels(result)
     render_advanced_details(result)
 
@@ -782,13 +867,8 @@ def render_log_snapshot(result: dict) -> None:
         "regime": result["regime"],
         "kc_state": result["kc"]["state"],
         "kc_direction": result["kc"].get("release_direction"),
-        "squeeze_on": result["kc"].get("squeeze_on"),
-        "squeeze_fired": result["kc"].get("squeeze_fired"),
-        "squeeze_recent": result["kc"].get("squeeze_recent"),
-        "bars_since_squeeze_release": result["kc"].get("bars_since_squeeze_release"),
-        "release_chase_atr": result["kc"].get("release_chase_atr"),
         "bias": result["scores"]["bias"],
-        "confidence": result["scores"]["confidence"],
+        "rule_score": result["scores"].get("rule_score", result["scores"].get("confidence")),
         "raw_action": result["action"],
         "final_action": result["veto"]["final_action"],
         "plan_status": result["status"],
@@ -806,8 +886,13 @@ def render_log_snapshot(result: dict) -> None:
         "plan_note": result["plan"].get("note", ""),
     }
     snap = pd.DataFrame([row])
+    horizon = pd.DataFrame(_horizon_rows(result.get("multi_horizon", [])))
+    st.subheader("Scan snapshot")
     st.dataframe(snap, use_container_width=True)
     st.download_button("Download snapshot CSV", snap.to_csv(index=False), file_name="xauusd_forecast_snapshot.csv")
+    st.subheader("Horizon snapshot")
+    st.dataframe(horizon, use_container_width=True, hide_index=True)
+    st.download_button("Download horizon CSV", horizon.to_csv(index=False), file_name="xauusd_horizon_snapshot.csv")
 
 
 settings = load_yaml(ROOT / "config/default_settings.yaml")
