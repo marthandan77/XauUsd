@@ -1,0 +1,128 @@
+name: Apply multi-horizon forecast patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-multi-horizon.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wire multi-horizon forecast into Forecast Manager
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('app.py')
+          text = app.read_text(encoding='utf-8')
+
+          old = 'from src.forecast_engine import choose_action, score_forecast\n'
+          new = old + 'from src.horizon_forecast import build_multi_horizon_forecast\n'
+          if 'from src.horizon_forecast import build_multi_horizon_forecast' not in text:
+              text = text.replace(old, new)
+
+          old = '    display_plan = plan if has_plan_levels(plan) else candidate_plan\n\n    advisory_qty = 0.0\n'
+          new = '    display_plan = plan if has_plan_levels(plan) else candidate_plan\n    multi_horizon = build_multi_horizon_forecast(bars, scan_settings)\n\n    advisory_qty = 0.0\n'
+          if 'multi_horizon = build_multi_horizon_forecast(bars, scan_settings)' not in text:
+              text = text.replace(old, new)
+
+          old = '        "advisory_qty": advisory_qty,\n    }\n\n\ndef price_chart'
+          new = '        "advisory_qty": advisory_qty,\n        "multi_horizon": multi_horizon,\n    }\n\n\ndef price_chart'
+          if '"multi_horizon": multi_horizon' not in text:
+              text = text.replace(old, new)
+
+          render_func = r'''
+
+def render_multi_horizon_forecast(result: dict) -> None:
+    st.subheader("5m / 15m / 30m / 1h predictors")
+    forecasts = result.get("multi_horizon", [])
+    if not forecasts:
+        st.info("Multi-horizon forecast is not available for this scan.")
+        return
+
+    rows = []
+    for item in forecasts:
+        rows.append({
+            "Horizon": item.get("horizon"),
+            "Bias": item.get("bias"),
+            "Up %": item.get("up_probability"),
+            "Down %": item.get("down_probability"),
+            "Flat %": item.get("flat_probability"),
+            "Expected return %": item.get("expected_return_pct"),
+            "Expected low": item.get("expected_low"),
+            "Expected high": item.get("expected_high"),
+            "EV buy": item.get("ev_buy_points"),
+            "EV sell": item.get("ev_sell_points"),
+            "Decision": item.get("decision"),
+            "Expiry": item.get("expiry"),
+            "Training rows": item.get("training_rows"),
+            "Status": item.get("status"),
+        })
+
+    table = pd.DataFrame(rows)
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.caption(
+        "Formula engine: rolling ridge regression on forward log returns plus residual volatility range. "
+        "Use 5m timeframe for exact 5m/15m/30m/1h horizons. Probabilities are model estimates, not guarantees."
+    )
+'''
+          marker = '\n\ndef render_forecast_manager(result: dict) -> None:\n'
+          if 'def render_multi_horizon_forecast(result: dict) -> None:' not in text:
+              text = text.replace(marker, render_func + marker)
+
+          old = '    render_simple_case_panel(result)\n    render_trade_levels(result)\n'
+          new = '    render_simple_case_panel(result)\n    render_multi_horizon_forecast(result)\n    render_trade_levels(result)\n'
+          if 'render_multi_horizon_forecast(result)' not in text.split('def render_forecast_manager', 1)[1]:
+              text = text.replace(old, new)
+
+          app.write_text(text, encoding='utf-8')
+
+          market = Path('src/market_map.py')
+          mtext = market.read_text(encoding='utf-8')
+          old = '    window = df.tail(max(80, int(settings.get("lookback_days", 7)) * 96))\n'
+          new = '''    period = str(settings.get("price_period", f"{settings.get('lookback_days', 7)}d"))
+    try:
+        if period.endswith("d"):
+            lookback_days = int(period[:-1])
+        elif period.endswith("mo"):
+            lookback_days = int(period[:-2]) * 30
+        elif period.endswith("y"):
+            lookback_days = int(period[:-1]) * 365
+        else:
+            lookback_days = int(settings.get("lookback_days", 7))
+    except Exception:
+        lookback_days = int(settings.get("lookback_days", 7))
+    bars_per_day = {"5m": 288, "15m": 96, "30m": 48, "1h": 24, "4h": 6, "1d": 1}.get(
+        str(settings.get("price_interval", "15m")), 96
+    )
+    window = df.tail(max(80, lookback_days * bars_per_day))
+'''
+          if old in mtext:
+              mtext = mtext.replace(old, new)
+          market.write_text(mtext, encoding='utf-8')
+
+          range_model = Path('src/range_model.py')
+          rtext = range_model.read_text(encoding='utf-8')
+          rtext = rtext.replace('if regime in {"bull_trend", "bullish_squeeze_breakout"}:', 'if regime in {"bull_trend", "bullish_squeeze_breakout", "bullish_release_confirmed"}:')
+          rtext = rtext.replace('elif regime in {"bear_trend", "bearish_squeeze_breakout"}:', 'elif regime in {"bear_trend", "bearish_squeeze_breakout", "bearish_release_confirmed"}:')
+          range_model.write_text(rtext, encoding='utf-8')
+          PY
+      - name: Remove temporary patch files
+        run: |
+          rm -f sitecustomize.py
+          rm -f .github/workflows/patch-lookback-option.yml
+          rm -f .github/workflows/apply-multi-horizon.yml
+      - name: Syntax check
+        run: python -m py_compile app.py src/horizon_forecast.py src/market_map.py src/range_model.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py src/market_map.py src/range_model.py sitecustomize.py .github/workflows/patch-lookback-option.yml .github/workflows/apply-multi-horizon.yml
+          git diff --cached --quiet || git commit -m "Show multi-horizon predictors after scan"
+          git push
