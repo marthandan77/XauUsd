@@ -36,6 +36,21 @@ def _ev_ok(item: dict, side: str) -> bool:
     return ev >= float(min_ev or 0.0)
 
 
+def _validated_side(item: dict, side: str, settings: dict) -> bool:
+    min_samples = int(settings.get("walk_forward_min_side_samples", 8))
+    min_accuracy = float(settings.get("walk_forward_min_accuracy", 55.0))
+    samples_key = "bull_validation_samples" if side == "bullish" else "bear_validation_samples"
+    accuracy_key = "bull_confidence" if side == "bullish" else "bear_confidence"
+    accuracy = _finite_float(item.get(accuracy_key))
+    samples = int(item.get(samples_key, 0) or 0)
+    return item.get("status") == "ok" and samples >= min_samples and accuracy is not None and accuracy >= min_accuracy
+
+
+def _row_validated(item: dict, settings: dict) -> bool:
+    min_tests = int(settings.get("walk_forward_min_tests", 30))
+    return item.get("status") == "ok" and int(item.get("validation_tests", 0) or 0) >= min_tests and item.get("validation_status") in {"Validated", "No active history"}
+
+
 def _strongly_opposite(item: dict, action: str) -> bool:
     if item.get("status") != "ok":
         return False
@@ -62,9 +77,13 @@ def _add_horizon_alignment_veto(action: str, reasons: list[str], settings: dict,
     if action == "BUY PLAN":
         if h5.get("bias") != "bullish" or not _ev_ok(h5, "buy"):
             reasons.append("5m signal does not confirm buy edge above minimum EV")
+        if not _validated_side(h5, "bullish", settings):
+            reasons.append("5m buy edge failed walk-forward validation")
     elif action == "SELL PLAN":
         if h5.get("bias") != "bearish" or not _ev_ok(h5, "sell"):
             reasons.append("5m signal does not confirm sell edge above minimum EV")
+        if not _validated_side(h5, "bearish", settings):
+            reasons.append("5m sell edge failed walk-forward validation")
 
     for label in FILTER_HORIZONS:
         item = horizons.get(label)
@@ -74,8 +93,15 @@ def _add_horizon_alignment_veto(action: str, reasons: list[str], settings: dict,
         if item.get("status") != "ok":
             reasons.append(f"{label} filter not clean enough for final trade permission")
             continue
+        if not _row_validated(item, settings):
+            reasons.append(f"{label} filter failed walk-forward validation")
+            continue
         if _strongly_opposite(item, action):
-            reasons.append(f"{label} filter is opposite to the trade direction")
+            side = "bearish" if action == "BUY PLAN" else "bullish"
+            if _validated_side(item, side, settings):
+                reasons.append(f"{label} validated filter is opposite to the trade direction")
+            else:
+                reasons.append(f"{label} opposite filter is not validated; no clean permission under zero-heuristic mode")
 
 
 def apply_veto(
