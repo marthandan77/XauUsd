@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .backfill import backfill_learning_history as _backfill_learning_history
 from .github_store import GitHubLearningStore
 from .metrics import build_metrics_payload
 from .outcome_evaluator import evaluate_due_predictions
@@ -41,3 +42,61 @@ def generate_challenger(result: dict) -> dict:
     if not result or not result.get("ok"):
         return {"ok": False, "reason": "Run SCAN NOW before generating a challenger."}
     return generate_challenger_from_bars(result.get("bars"), result.get("settings", {}), store)
+
+
+def backfill_learning_history(result: dict) -> dict:
+    if not result or not result.get("ok"):
+        return {"ok": False, "reason": "Run SCAN NOW before backfill."}
+    return _backfill_learning_history(result)
+
+
+def _install_sidebar_backfill_button() -> None:
+    """Install a safe sidebar backfill button below the existing Apply button.
+
+    The main Streamlit app already imports this controller. This installer avoids a large
+    app.py rewrite while keeping the backfill UI next to the settings controls. It does
+    not execute any Streamlit command during import; it only wraps the button method and
+    renders the backfill button when the existing settings Apply button is drawn.
+    """
+    try:
+        import streamlit as st
+        from streamlit.delta_generator import DeltaGenerator
+    except Exception:
+        return
+
+    current = DeltaGenerator.button
+    if getattr(current, "_xau_backfill_patched", False):
+        return
+    original = getattr(current, "_xau_original_button", current)
+
+    def patched_button(self, label, *args, **kwargs):
+        clicked = original(self, label, *args, **kwargs)
+        if label == "Apply" and kwargs.get("key") == "settings_apply_button":
+            result = st.session_state.get("last_scan_result")
+            ready = isinstance(result, dict) and bool(result.get("ok")) and result.get("bars") is not None
+            backfill_clicked = st.sidebar.button(
+                "Backfill Learning History",
+                key="learning_backfill_sidebar_button",
+                disabled=not ready,
+                use_container_width=True,
+                help="Run SCAN NOW first. Backfill uses the latest scanned bars to create historical walk-forward outcome samples.",
+            )
+            st.sidebar.caption("Backfill is enabled only after SCAN NOW.")
+            if backfill_clicked:
+                with st.sidebar:
+                    with st.spinner("Backfilling learning history..."):
+                        status = backfill_learning_history(result)
+                st.session_state["learning_backfill"] = status
+                st.session_state["learning_metrics"] = refresh_learning_metrics()
+                if status.get("ok"):
+                    st.sidebar.success(f"Backfilled {status.get('outcome_count', 0)} outcomes.")
+                else:
+                    st.sidebar.warning(status.get("reason", "Backfill failed."))
+        return clicked
+
+    patched_button._xau_backfill_patched = True
+    patched_button._xau_original_button = original
+    DeltaGenerator.button = patched_button
+
+
+_install_sidebar_backfill_button()
