@@ -11,10 +11,11 @@ import yaml
 from src.ai_explainer import explain
 from src.data_feed import FeedResult, load_csv, load_live_bars, make_sample_bars
 from src.forecast_engine import choose_action, score_forecast
+from src.gate_diagnostics import build_gate_breakdown, signal_stage, summarize_gate_blockers
 from src.horizon_forecast import build_multi_horizon_forecast
 from src.indicators import add_indicators
 from src.kc_squeeze_engine import kc_squeeze_summary
-from src.learning.controller import generate_challenger, refresh_learning_metrics, run_learning_cycle
+from src.learning.controller import backfill_learning_history, refresh_learning_metrics, run_learning_cycle
 from src.macro_engine import macro_context
 from src.market_map import build_market_map
 from src.range_model import price_bands
@@ -68,6 +69,7 @@ PERSISTED_SETTING_KEYS = [
     "walk_forward_min_tests",
     "walk_forward_min_side_samples",
     "walk_forward_min_accuracy",
+    "learning_backfill_points",
     "stale_candle_multiplier",
 ]
 
@@ -174,7 +176,13 @@ def clear_control_state() -> None:
     for key in list(st.session_state.keys()):
         if str(key).startswith(CONTROL_PREFIX):
             del st.session_state[key]
-    for key in ["last_scan_result", "last_scan_error", "last_scan_time", "learning_metrics", "learning_challenger"]:
+    for key in [
+        "last_scan_result",
+        "last_scan_error",
+        "last_scan_time",
+        "learning_metrics",
+        "learning_backfill",
+    ]:
         st.session_state.pop(key, None)
 
 
@@ -193,47 +201,40 @@ def stage_preset_values(preset: dict) -> None:
             st.session_state[_control_key(key)] = value
 
 
-def refresh_panel() -> None:
-    st.sidebar.header("Refresh")
-    if st.sidebar.button("Manual refresh page", type="secondary"):
-        st.rerun()
-    st.sidebar.caption("Manual page refresh does not rescan. Use SCAN NOW on Forecast Manager to recalculate.")
-
-
 def fmt_price(value) -> str:
     if value is None:
         return "N/A"
     try:
-        value = float(value)
+        number = float(value)
     except Exception:
         return "N/A"
-    if not math.isfinite(value):
+    if not math.isfinite(number):
         return "N/A"
-    return f"{value:,.2f}"
+    return f"{number:,.2f}"
 
 
 def fmt_units(value) -> str:
     if value is None:
         return "N/A"
     try:
-        value = float(value)
+        number = float(value)
     except Exception:
         return "N/A"
-    if not math.isfinite(value) or value <= 0:
+    if not math.isfinite(number) or number <= 0:
         return "N/A"
-    return f"{value:,.2f}"
+    return f"{number:,.2f}"
 
 
 def fmt_number(value, digits: int = 2) -> str:
     if value is None:
         return "N/A"
     try:
-        value = float(value)
+        number = float(value)
     except Exception:
         return "N/A"
-    if not math.isfinite(value):
+    if not math.isfinite(number):
         return "N/A"
-    return f"{value:.{digits}f}"
+    return f"{number:.{digits}f}"
 
 
 def has_plan_levels(plan: dict) -> bool:
@@ -247,32 +248,26 @@ def plan_value(plan: dict, key: str):
 
 
 def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[str, dict, str]:
+    empty = {
+        "entry_zone_low": None,
+        "entry_zone_high": None,
+        "stop": None,
+        "tp1": None,
+        "tp2": None,
+        "risk": 0.0,
+    }
     if bool(settings.get("signals_disabled", False)):
-        return "NO CANDIDATE", {
-            "entry_zone_low": None,
-            "entry_zone_high": None,
-            "stop": None,
-            "tp1": None,
-            "tp2": None,
-            "risk": 0.0,
-            "note": "Signals disabled until real data is active.",
-        }, ""
+        empty["note"] = "Signals disabled until real data is active."
+        return "NO CANDIDATE", empty, ""
+
+    if bool(scores.get("force_wait", False)):
+        empty["note"] = scores.get("wait_reason", "Waiting for confirmation.")
+        return "NO CANDIDATE", empty, ""
 
     threshold = int(settings.get("forecast_threshold", 65))
     bias = str(scores.get("bias", "mixed"))
     bull_score = int(scores.get("bull_score", 0))
     bear_score = int(scores.get("bear_score", 0))
-
-    if bool(scores.get("force_wait", False)):
-        return "NO CANDIDATE", {
-            "entry_zone_low": None,
-            "entry_zone_high": None,
-            "stop": None,
-            "tp1": None,
-            "tp2": None,
-            "risk": 0.0,
-            "note": scores.get("wait_reason", "Waiting for confirmation."),
-        }, ""
 
     if bias == "bullish" and bull_score >= threshold and bool(settings.get("long_plans_enabled", True)):
         plan = build_trade_plan("BUY PLAN", market, settings)
@@ -289,18 +284,11 @@ def candidate_plan_from_scores(scores: dict, market, settings: dict) -> tuple[st
         plan["note"] = "Bearish preview only. Short plans are disabled, so this is not an active SELL PLAN."
         return "SELL PREVIEW ONLY", plan, "Seller pressure is developing, but this is not an active sell signal."
 
-    return "NO CANDIDATE", {
-        "entry_zone_low": None,
-        "entry_zone_high": None,
-        "stop": None,
-        "tp1": None,
-        "tp2": None,
-        "risk": 0.0,
-        "note": "No active trade plan. Wait for a cleaner case.",
-    }, ""
+    empty["note"] = "No active trade plan. Wait for a cleaner case."
+    return "NO CANDIDATE", empty, ""
 
 
-def plan_status(action: str, final_action: str, plan: dict, candidate_action: str) -> str:
+def plan_status(action: str, final_action: str, candidate_action: str) -> str:
     if final_action == "BUY PLAN":
         return "Buy allowed"
     if final_action == "SELL PLAN":
@@ -309,9 +297,32 @@ def plan_status(action: str, final_action: str, plan: dict, candidate_action: st
         return "Buyer pressure only"
     if candidate_action in {"SELL CANDIDATE", "SELL PREVIEW ONLY"}:
         return "Seller pressure only"
-    if action in ACTIONABLE and has_plan_levels(plan):
+    if action in ACTIONABLE:
         return f"Rejected {action}"
     return "No active trade"
+
+
+def render_sidebar_backfill() -> None:
+    result = st.session_state.get("last_scan_result")
+    ready = isinstance(result, dict) and bool(result.get("ok")) and result.get("bars") is not None
+    clicked = st.sidebar.button(
+        "Backfill Learning History",
+        key="learning_backfill_sidebar_button",
+        disabled=not ready,
+        use_container_width=True,
+        help="Run SCAN NOW first. Backfill uses the latest scanned bars to create historical walk-forward outcome samples.",
+    )
+    st.sidebar.caption("Backfill is enabled only after SCAN NOW. It is for diagnosis, not auto-optimization.")
+    if clicked:
+        with st.sidebar:
+            with st.spinner("Backfilling learning history..."):
+                status = backfill_learning_history(result)
+        st.session_state["learning_backfill"] = status
+        st.session_state["learning_metrics"] = refresh_learning_metrics()
+        if status.get("ok"):
+            st.sidebar.success(f"Backfilled {status.get('outcome_count', 0)} outcomes.")
+        else:
+            st.sidebar.warning(status.get("reason", "Backfill failed."))
 
 
 def settings_panel(settings: dict, presets: dict) -> dict:
@@ -320,13 +331,14 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     left_col, right_col = st.sidebar.columns(2)
     reset_clicked = left_col.button("Reset", key="settings_reset_button", use_container_width=True)
     apply_clicked = right_col.button("Apply", key="settings_apply_button", type="primary", use_container_width=True)
+    render_sidebar_backfill()
 
     if reset_clicked:
         clear_query_settings()
         clear_control_state()
         st.rerun()
 
-    st.sidebar.caption("Change controls first, then press Apply. Press SCAN NOW on Forecast Manager to recalculate.")
+    st.sidebar.caption("Change controls first, press Apply, then press SCAN NOW to recalculate.")
     st.sidebar.header("Forecast controls")
 
     if presets:
@@ -347,7 +359,6 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     st.sidebar.slider("Bull threshold", 50, 95, key=_control_key("buy_threshold"))
     st.sidebar.slider("Bear threshold", 50, 95, key=_control_key("sell_threshold"))
     st.sidebar.slider("Watch threshold", 40, 90, key=_control_key("wait_threshold"))
-    st.sidebar.slider("ATR guard multiplier", 0.8, 2.5, step=0.1, key=_control_key("atr_multiplier"))
     st.sidebar.slider("Minimum room ratio", 1.0, 3.0, step=0.1, key=_control_key("min_reward_risk"))
     st.sidebar.slider("Middle zone lower %", 10, 49, key=_control_key("middle_range_lower_pct"))
     st.sidebar.slider("Middle zone upper %", 51, 90, key=_control_key("middle_range_upper_pct"))
@@ -385,6 +396,7 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     st.sidebar.slider("Walk-forward min tests", 10, 120, step=5, key=_control_key("walk_forward_min_tests"))
     st.sidebar.slider("Walk-forward side samples", 3, 50, step=1, key=_control_key("walk_forward_min_side_samples"))
     st.sidebar.slider("Walk-forward min accuracy", 50.0, 75.0, step=1.0, key=_control_key("walk_forward_min_accuracy"))
+    st.sidebar.slider("Backfill points / horizon", 5, 250, step=5, key=_control_key("learning_backfill_points"))
     st.sidebar.slider("Stale candle multiplier", 1.0, 5.0, step=0.5, key=_control_key("stale_candle_multiplier"))
 
     st.sidebar.caption("BUY and SELL plan processing is always enabled.")
@@ -405,12 +417,18 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     return settings
 
 
+def refresh_panel() -> None:
+    st.sidebar.header("Refresh")
+    if st.sidebar.button("Manual refresh page", type="secondary"):
+        st.rerun()
+    st.sidebar.caption("Manual page refresh does not rescan. Use SCAN NOW on Forecast Manager to recalculate.")
+
+
 def data_panel(settings: dict) -> dict:
     st.sidebar.header("Data")
     data_mode = st.sidebar.radio("Data mode", ["Twelve Data API", "CSV upload", "Sample"], index=0, key="data_mode")
     settings["data_mode"] = data_mode
     settings["uploaded_file"] = None
-
     if data_mode == "CSV upload":
         settings["uploaded_file"] = st.sidebar.file_uploader("Upload OHLC CSV", type=["csv"])
     elif data_mode == "Twelve Data API":
@@ -449,7 +467,7 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
     scan_settings = dict(settings)
     feed = fetch_bars(scan_settings)
     scan_settings["signals_disabled"] = feed.source == "sample"
-    scan_settings["signals_disabled_reason"] = "Sample data source; KC trade signals are disabled until live API or uploaded real CSV is active."
+    scan_settings["signals_disabled_reason"] = "Sample data source; trade signals are disabled until live API or uploaded real CSV is active."
 
     bars_raw = add_indicators(feed.bars, scan_settings)
     bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
@@ -484,7 +502,7 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
     veto = apply_veto(action, plan, market, regime, macro, scan_settings, latest_row, multi_horizon)
     summary = explain(regime, scores, veto, market, macro)
     active_plan = veto["final_action"] in ACTIONABLE
-    status = plan_status(action, veto["final_action"], plan, candidate_action)
+    status = plan_status(action, veto["final_action"], candidate_action)
     display_plan = plan if has_plan_levels(plan) else candidate_plan
 
     advisory_qty = 0.0
@@ -496,7 +514,7 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
             stop=float(plan["stop"]),
         )
 
-    return {
+    result = {
         "ok": True,
         "scan_time": pd.Timestamp.now(tz="Asia/Singapore"),
         "feed": feed,
@@ -522,6 +540,10 @@ def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
         "advisory_qty": advisory_qty,
         "multi_horizon": multi_horizon,
     }
+    result["signal_stage"] = signal_stage(result)
+    result["gate_breakdown"] = build_gate_breakdown(result)
+    result["gate_summary"] = summarize_gate_blockers(result)
+    return result
 
 
 def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go.Figure:
@@ -558,12 +580,12 @@ def render_source_metrics(result: dict) -> None:
     feed = result["feed"]
     bars = result.get("bars")
     market = result.get("market")
-    source_cols = st.columns(5)
-    source_cols[0].metric("Data source", feed.source)
-    source_cols[1].metric("Latest price", fmt_price(market.price if market is not None else None))
-    source_cols[2].metric("Rows loaded", f"{len(feed.bars):,}")
-    source_cols[3].metric("Rows after warm-up", f"{len(bars):,}" if bars is not None else "0")
-    source_cols[4].metric("Last scan", result["scan_time"].strftime("%H:%M:%S"))
+    cols = st.columns(5)
+    cols[0].metric("Data source", feed.source)
+    cols[1].metric("Latest price", fmt_price(market.price if market is not None else None))
+    cols[2].metric("Rows loaded", f"{len(feed.bars):,}")
+    cols[3].metric("Rows after warm-up", f"{len(bars):,}" if bars is not None else "0")
+    cols[4].metric("Last scan", result["scan_time"].strftime("%H:%M:%S"))
     if feed.warning:
         st.warning(feed.warning)
     if bool(result["settings"].get("signals_disabled", False)):
@@ -588,10 +610,11 @@ def regime_label(regime: str) -> str:
         "compression": "market storing energy before a breakout",
         "squeeze_release_now": "KC compression just released, direction not confirmed",
         "squeeze_release_recent": "recent KC release, direction not confirmed",
-        "bullish_release_confirmed": "upside breakout confirmed",
-        "bearish_release_confirmed": "downside breakout confirmed",
-        "bullish_release_overextended": "upside breakout is already stretched",
-        "bearish_release_overextended": "downside breakout is already stretched",
+        "squeeze_release_expired": "previous KC release expired",
+        "bullish_release_confirmed": "upside release confirmed",
+        "bearish_release_confirmed": "downside release confirmed",
+        "bullish_release_overextended": "upside release is already stretched",
+        "bearish_release_overextended": "downside release is already stretched",
         "shock": "abnormal volatility, avoid new trades",
     }.get(regime, regime.replace("_", " "))
 
@@ -640,6 +663,7 @@ def build_simple_market_case(result: dict) -> dict:
     room_ratio = float(veto.get("room_ratio", 0.0) or 0.0)
     range_position = float(market.range_position_pct)
     final_action = str(veto.get("final_action", "HOLD"))
+    stage = result.get("signal_stage") or signal_stage(result)
 
     side = "buyers" if bull > bear else "sellers" if bear > bull else "neither side"
     strength = max(bull, bear)
@@ -662,6 +686,7 @@ def build_simple_market_case(result: dict) -> dict:
         permission_detail = "The market does not show a clean trading edge right now."
 
     case_lines = [
+        f"Signal stage: {stage}.",
         f"Gold is in a {market_type}.",
         f"Current advantage: {side} with {strength_text}.",
         f"Price location: {location} at {range_position:.1f}% of the recent range.",
@@ -684,23 +709,21 @@ def build_simple_market_case(result: dict) -> dict:
     elif final_action not in ACTIONABLE:
         why_lines.append("No veto rejection, but score/location/room are not strong enough for an active trade.")
 
-    next_lines = []
-    if final_action in ACTIONABLE:
-        next_lines.append("Use the displayed entry, stop, and TP levels only if you agree with the setup manually.")
-    else:
-        next_lines.append("For sell: wait for seller strength above trigger, price closer to resistance, or a confirmed bearish breakdown with enough target room.")
-        next_lines.append("For buy: wait for buyer strength above trigger, price closer to support, or a confirmed bullish breakout with enough target room.")
-        next_lines.append("If target room stays poor, skip the trade.")
-
     return {
         "permission": permission,
         "permission_detail": permission_detail,
         "case_lines": case_lines,
         "why_lines": why_lines,
-        "next_lines": next_lines,
         "buyer_strength": bull,
         "seller_strength": bear,
     }
+
+
+def render_gate_breakdown(result: dict) -> None:
+    rows = result.get("gate_breakdown") or build_gate_breakdown(result)
+    st.subheader("Gate Breakdown")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption("This table shows exactly which module is blocking, watching, or passing. Backfill does not change these gates automatically.")
 
 
 def render_simple_case_panel(result: dict) -> None:
@@ -714,17 +737,16 @@ def render_simple_case_panel(result: dict) -> None:
     else:
         st.warning(f"{case['permission']} — {case['permission_detail']}")
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Buyer strength", f"{case['buyer_strength']}/100")
     c2.metric("Seller strength", f"{case['seller_strength']}/100")
+    c3.metric("Signal stage", result.get("signal_stage") or signal_stage(result))
     st.caption("Strength score is not win probability. It is the engine's raw signal pressure score.")
+
+    render_gate_breakdown(result)
 
     st.subheader("Why")
     for line in case["why_lines"]:
-        st.write(f"- {line}")
-
-    st.subheader("What to wait for")
-    for line in case["next_lines"]:
         st.write(f"- {line}")
 
 
@@ -734,11 +756,12 @@ def _horizon_rows(forecasts: list[dict]) -> list[dict]:
         rows.append({
             "Timeframe": item.get("horizon"),
             "Purpose": "Entry" if item.get("role") == "Signal" else "Filter",
-            "Bull Confidence": item.get("bull_confidence"),
-            "Bear Confidence": item.get("bear_confidence"),
+            "Current Read": item.get("bias"),
+            "Bull Accuracy": item.get("bull_confidence"),
+            "Bear Accuracy": item.get("bear_confidence"),
             "Validation": item.get("validation_status"),
-            "Samples": item.get("validation_tests"),
-            "Read": item.get("decision"),
+            "Tests": item.get("validation_tests"),
+            "Decision": item.get("decision"),
         })
     return rows
 
@@ -773,9 +796,7 @@ def render_multi_horizon_panel(result: dict) -> None:
         st.info("Multi-horizon output is unavailable for this scan.")
         return
     st.dataframe(pd.DataFrame(_horizon_rows(forecasts)), use_container_width=True, hide_index=True)
-    st.caption(
-        "Bull/Bear Confidence is walk-forward validated hit-rate. 5m is the entry signal. 1h, 4h, and Daily are filters only."
-    )
+    st.caption("Current Read = model read now. Bull/Bear Accuracy = recent walk-forward hit-rate for that side. 5m is entry; 1h, 4h, and Daily are filters only.")
     with st.expander("Advanced horizon model details"):
         st.dataframe(pd.DataFrame(_horizon_advanced_rows(forecasts)), use_container_width=True, hide_index=True)
 
@@ -827,6 +848,8 @@ def render_advanced_details(result: dict) -> None:
         b4.metric("Room ratio", f"{veto['room_ratio']:.2f}")
         st.write("Engine summary:")
         st.write(result["summary"])
+        st.write("Gate summary:")
+        st.write(result.get("gate_summary") or summarize_gate_blockers(result))
         if scores.get("force_wait") and scores.get("wait_reason"):
             st.warning(scores["wait_reason"])
         if result["candidate_note"]:
@@ -844,6 +867,7 @@ def render_forecast_manager(result: dict) -> None:
     render_multi_horizon_panel(result)
     render_trade_levels(result)
     render_advanced_details(result)
+    st.plotly_chart(price_chart(result["bars"], result["settings"], result["veto"]["final_action"], result["plan"]), use_container_width=True)
 
 
 def render_kc_page(result: dict) -> None:
@@ -891,6 +915,8 @@ def render_log_snapshot(result: dict) -> None:
         "warning": result["feed"].warning,
         "signals_disabled": result["settings"].get("signals_disabled", False),
         "price": result["market"].price,
+        "signal_stage": result.get("signal_stage"),
+        "gate_summary": result.get("gate_summary"),
         "regime": result["regime"],
         "kc_state": result["kc"]["state"],
         "kc_direction": result["kc"].get("release_direction"),
@@ -914,9 +940,13 @@ def render_log_snapshot(result: dict) -> None:
     }
     snap = pd.DataFrame([row])
     horizon = pd.DataFrame(_horizon_rows(result.get("multi_horizon", [])))
+    gates = pd.DataFrame(result.get("gate_breakdown") or build_gate_breakdown(result))
     st.subheader("Scan snapshot")
     st.dataframe(snap, use_container_width=True)
     st.download_button("Download snapshot CSV", snap.to_csv(index=False), file_name="xauusd_forecast_snapshot.csv")
+    st.subheader("Gate snapshot")
+    st.dataframe(gates, use_container_width=True, hide_index=True)
+    st.download_button("Download gate CSV", gates.to_csv(index=False), file_name="xauusd_gate_snapshot.csv")
     st.subheader("Horizon snapshot")
     st.dataframe(horizon, use_container_width=True, hide_index=True)
     st.download_button("Download horizon CSV", horizon.to_csv(index=False), file_name="xauusd_horizon_snapshot.csv")
@@ -924,20 +954,24 @@ def render_log_snapshot(result: dict) -> None:
 
 def render_learning_page(result: dict | None) -> None:
     st.subheader("GitHub Learning")
-    st.write("Learning is GitHub-backed: each scan can log predictions, evaluate expired outcomes, and generate challenger settings. Live settings are not overwritten automatically.")
+    st.write("Learning is GitHub-backed. It logs predictions, evaluates expired outcomes, and reads backfill batches. It does not generate recommended settings or auto-tune live settings.")
 
     if result is not None and result.get("learning"):
         st.subheader("Last learning cycle")
         st.json(result.get("learning"))
 
-    left, right = st.columns(2)
-    if left.button("Refresh learning metrics", use_container_width=True):
+    col1, col2 = st.columns(2)
+    if col1.button("Refresh learning metrics", use_container_width=True):
         with st.spinner("Reading learning outcomes from GitHub..."):
             st.session_state["learning_metrics"] = refresh_learning_metrics()
+    if col2.button("Backfill from last scan", use_container_width=True, disabled=result is None or not result.get("ok", False)):
+        with st.spinner("Backfilling learning history from latest scan bars..."):
+            st.session_state["learning_backfill"] = backfill_learning_history(result)
+            st.session_state["learning_metrics"] = refresh_learning_metrics()
 
-    if right.button("Generate challenger settings", use_container_width=True, disabled=result is None or not result.get("ok", False)):
-        with st.spinner("Testing bounded challenger settings with walk-forward validation..."):
-            st.session_state["learning_challenger"] = generate_challenger(result)
+    if st.session_state.get("learning_backfill"):
+        st.subheader("Last backfill")
+        st.json(st.session_state["learning_backfill"])
 
     metrics_payload = st.session_state.get("learning_metrics") or (result or {}).get("learning", {}).get("metrics")
     if metrics_payload:
@@ -947,74 +981,50 @@ def render_learning_page(result: dict | None) -> None:
             st.dataframe(pd.DataFrame(metrics), use_container_width=True, hide_index=True)
             st.download_button("Download learning report", metrics_payload.get("report", ""), file_name="xauusd_learning_report.md")
         else:
-            st.info("No completed outcomes yet. Let predictions expire, then run another scan or refresh metrics.")
-
-    challenger = st.session_state.get("learning_challenger")
-    if challenger:
-        st.subheader("Challenger settings")
-        if challenger.get("ok"):
-            tuned = challenger.get("challenger", {}).get("tuned_settings", {})
-            st.success("Challenger generated and written to config/challenger_settings.yaml if GitHub write access is configured.")
-            st.json(tuned)
-            st.caption("Manual review required before promotion to live settings.")
-        else:
-            st.warning(challenger.get("reason", "Challenger generation failed."))
-        with st.expander("Challenger details"):
-            st.json(challenger)
+            st.info("No completed outcomes yet. Let predictions expire, run another scan, or run backfill from a valid scan.")
 
 
-settings = load_yaml(ROOT / "config/default_settings.yaml")
-settings = apply_query_settings(settings)
-presets = load_yaml(ROOT / "config/presets.yaml")
-settings = settings_panel(settings, presets)
-refresh_panel()
-macro_bias = st.sidebar.selectbox("Macro bias", ["mixed", "supportive", "restrictive"], index=0)
-settings = data_panel(settings)
+def main() -> None:
+    settings = load_yaml(ROOT / "config/default_settings.yaml")
+    settings = apply_query_settings(settings)
+    presets = load_yaml(ROOT / "config/presets.yaml")
+    settings = settings_panel(settings, presets)
+    refresh_panel()
+    macro_bias = st.sidebar.selectbox("Macro bias", ["mixed", "supportive", "restrictive"], index=0)
+    settings = data_panel(settings)
 
-st.title("XAU/USD Forecast Manager")
-st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio("Page", ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Learning", "Settings", "Log Snapshot"])
+    st.title("XAU/USD Forecast Manager")
+    st.caption("Advisory dashboard only. No broker execution. No auto-trading. Diagnostics first, signal second, no recommendation tuning.")
+    page = st.sidebar.radio("Page", ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Learning", "Settings", "Log Snapshot"])
 
-if page == "Forecast Manager":
-    scan_label = "RESCAN NOW" if st.session_state.get("last_scan_result") else "SCAN NOW"
-    if st.button(scan_label, type="primary", use_container_width=True):
-        with st.spinner("Scanning XAU/USD and running strategy..."):
-            scan_result = run_strategy_scan(settings, macro_bias)
-            scan_result["learning"] = run_learning_cycle(scan_result)
-            st.session_state["last_scan_result"] = scan_result
+    if page == "Forecast Manager":
+        scan_label = "RESCAN NOW" if st.session_state.get("last_scan_result") else "SCAN NOW"
+        if st.button(scan_label, type="primary", use_container_width=True):
+            with st.spinner("Scanning XAU/USD and running strategy..."):
+                scan_result = run_strategy_scan(settings, macro_bias)
+                scan_result["learning"] = run_learning_cycle(scan_result)
+                st.session_state["last_scan_result"] = scan_result
 
-result = st.session_state.get("last_scan_result")
+    result = st.session_state.get("last_scan_result")
 
-if page == "Forecast Manager":
-    if result is None:
-        render_no_scan()
-    else:
-        render_forecast_manager(result)
-elif page == "KC Squeeze":
-    if result is None:
-        render_no_scan()
-    else:
-        render_kc_page(result)
-elif page == "Market Map":
-    if result is None:
-        render_no_scan()
-    else:
-        render_market_map_page(result)
-elif page == "Macro / News":
-    st.subheader("Macro context")
-    if result is None:
-        st.json(macro_context(macro_bias, bool(settings.get("news_block_manual", False))))
-    else:
-        st.json(result["macro"])
-    st.write("Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches. API calendar can be added later.")
-elif page == "Learning":
-    render_learning_page(result)
-elif page == "Settings":
-    st.subheader("Active settings")
-    st.json(safe_settings(settings))
-    st.download_button("Download settings YAML", yaml.safe_dump(safe_settings(settings), sort_keys=False), file_name="active_settings.yaml")
-elif page == "Log Snapshot":
-    if result is None:
-        render_no_scan()
-    else:
-        render_log_snapshot(result)
+    if page == "Forecast Manager":
+        render_no_scan() if result is None else render_forecast_manager(result)
+    elif page == "KC Squeeze":
+        render_no_scan() if result is None else render_kc_page(result)
+    elif page == "Market Map":
+        render_no_scan() if result is None else render_market_map_page(result)
+    elif page == "Macro / News":
+        st.subheader("Macro context")
+        st.json(macro_context(macro_bias, bool(settings.get("news_block_manual", False))) if result is None else result["macro"])
+        st.write("Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches. API calendar can be added later.")
+    elif page == "Learning":
+        render_learning_page(result)
+    elif page == "Settings":
+        st.subheader("Active settings")
+        st.json(safe_settings(settings))
+        st.download_button("Download settings YAML", yaml.safe_dump(safe_settings(settings), sort_keys=False), file_name="active_settings.yaml")
+    elif page == "Log Snapshot":
+        render_no_scan() if result is None else render_log_snapshot(result)
+
+
+main()
