@@ -5,7 +5,9 @@ venv/
 .env
 .streamlit/secrets.toml
 data/
-artifacts/
+artifacts/*
+!artifacts/horizon/
+!artifacts/horizon/**
 *.db
 *.csv
 *.log
