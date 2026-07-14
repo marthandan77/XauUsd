@@ -152,9 +152,27 @@ def apply_veto(
     if action == "SELL PLAN" and not bool(settings.get("short_plans_enabled", False)):
         reasons.append("short plans disabled")
 
+    entry_low = _finite_float(plan.get("entry_zone_low"))
+    entry_high = _finite_float(plan.get("entry_zone_high"))
+    entry_mid = None if entry_low is None or entry_high is None else (entry_low + entry_high) / 2.0
+    slippage_pips = float(settings.get("slippage_model_pips", 2))
+    slippage_price = slippage_pips * 0.01
+
     rr = room_ratio(action, plan, market)
-    if action in ACTIONABLE_PLANS and rr < float(settings.get("min_reward_risk", 1.2)):
-        reasons.append("not enough room to target")
+    if action in ACTIONABLE_PLANS and entry_mid is not None:
+        if action == "BUY PLAN":
+            adjusted_entry = entry_mid + slippage_price
+            adjusted_risk = adjusted_entry - float(plan.get("stop", adjusted_entry))
+            adjusted_room = float(market.resistance) - adjusted_entry
+        else:
+            adjusted_entry = entry_mid - slippage_price
+            adjusted_risk = float(plan.get("stop", adjusted_entry)) - adjusted_entry
+            adjusted_room = adjusted_entry - float(market.support)
+        rr = max(adjusted_room / adjusted_risk, 0.0) if adjusted_risk > 0 else 0.0
+
+    min_room_ratio = float(settings.get("min_reward_risk", 1.2))
+    if action in ACTIONABLE_PLANS and rr < min_room_ratio:
+        reasons.append(f"not enough slippage-adjusted room to target: {rr:.2f} < {min_room_ratio:.2f}")
 
     risk = float(plan.get("risk", 0) or 0)
     atr = float(market.atr)

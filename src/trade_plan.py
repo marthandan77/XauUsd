@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 
 def _floor_below_price(price: float, target: float, minimum_gap: float) -> float:
     """Keep a short-side target below current price."""
@@ -35,6 +37,8 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
     atr = float(market.atr)
     stop_mult = float(settings.get("atr_stop_multiplier", settings.get("atr_multiplier", 1.6)))
     min_tp1_distance = float(settings.get("min_tp1_atr_distance", 0.9))
+    account_size = float(settings.get("account_size", 10000))
+    risk_pct = float(settings.get("risk_per_trade_pct", 0.5)) / 100.0
 
     if action == "BUY PLAN":
         stop = min(float(market.swing_low), price - stop_mult * atr)
@@ -47,8 +51,10 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
         tp2 = price + max(buy_tp2_mult, buy_tp1_mult + 0.50) * atr
         tp1_distance_atr = _tp1_distance_atr("buy", entry_low, entry_high, tp1, atr)
         tp1_too_close = _tp1_too_close(tp1_distance_atr, settings)
+        quantity = advisory_position_size(account_size, risk_pct, (entry_low + entry_high) / 2.0, stop)
         return {
             "side": "buy_advisory",
+            "quantity": quantity,
             "entry_zone_low": entry_low,
             "entry_zone_high": entry_high,
             "stop": stop,
@@ -79,9 +85,11 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
         tp2 = min(_floor_below_price(price, tp2, 1.00 * atr), tp1 - 0.50 * atr)
         tp1_distance_atr = _tp1_distance_atr("sell", entry_low, entry_high, tp1, atr)
         tp1_too_close = _tp1_too_close(tp1_distance_atr, settings)
+        quantity = advisory_position_size(account_size, risk_pct, (entry_low + entry_high) / 2.0, stop)
 
         return {
             "side": "sell_advisory",
+            "quantity": quantity,
             "entry_zone_low": entry_low,
             "entry_zone_high": entry_high,
             "stop": stop,
@@ -97,6 +105,7 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
     if action == "EXIT LONG / AVOID BUY":
         return {
             "side": "exit_or_avoid",
+            "quantity": 0.0,
             "entry_zone_low": None,
             "entry_zone_high": None,
             "stop": None,
@@ -111,6 +120,7 @@ def build_trade_plan(action: str, market, settings: dict) -> dict:
 
     return {
         "side": "none",
+        "quantity": 0.0,
         "entry_zone_low": None,
         "entry_zone_high": None,
         "stop": None,
@@ -144,4 +154,5 @@ def advisory_position_size(account_equity: float, risk_pct: float, entry: float,
     risk_per_unit = abs(float(entry) - float(stop))
     if risk_per_unit <= 0:
         return 0.0
-    return (float(account_equity) * float(risk_pct)) / risk_per_unit
+    raw_quantity = (float(account_equity) * float(risk_pct)) / risk_per_unit
+    return math.floor(raw_quantity * 100) / 100

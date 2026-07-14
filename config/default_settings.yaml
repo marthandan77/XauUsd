@@ -30,6 +30,8 @@ min_reward_risk: 1.20
 tp1_r: 1.5
 tp2_r: 2.0
 risk_per_trade_pct: 0.5
+account_size: 10000
+slippage_model_pips: 2
 max_leverage_advisory: 2.0
 long_plans_enabled: true
 short_plans_enabled: true
@@ -44,6 +46,7 @@ max_sl_atr_fraction: 3.5
 atr_shock_multiple: 2.2
 sample_data_enabled: true
 kc_squeeze_enabled: true
+min_squeeze_duration_bars: 5
 bb_length: 20
 bb_mult: 2.0
 kc_length: 20

@@ -109,6 +109,39 @@ def kc_squeeze_summary(df: pd.DataFrame, settings: dict) -> dict:
     bars_since = _as_float(row.get("bars_since_squeeze_release"))
     release_chase_atr = _as_float(row.get("release_chase_atr"))
     chase_limit = float(settings.get("kc_release_chase_atr_limit", 1.0))
+    min_squeeze_duration = max(int(settings.get("min_squeeze_duration_bars", 5)), 1)
+
+    if squeeze_fired or squeeze_recent:
+        squeeze_series = df["squeeze_on"].fillna(False).astype(bool)
+        fired_series = df["squeeze_fired"].fillna(False).astype(bool)
+        release_positions = [position for position, fired in enumerate(fired_series.tolist()) if fired]
+        if release_positions:
+            release_position = release_positions[-1]
+            compression_duration = 0
+            for position in range(release_position - 1, -1, -1):
+                if not bool(squeeze_series.iloc[position]):
+                    break
+                compression_duration += 1
+            if compression_duration < min_squeeze_duration:
+                squeeze_fired = False
+                squeeze_recent = False
+                release_bullish = False
+                release_bearish = False
+                release_chase_risk = False
+                bars_since = None
+                release_chase_atr = None
+                row = row.copy()
+                row["squeeze_fired"] = False
+                row["squeeze_recent"] = False
+                row["bars_since_squeeze_release"] = None
+                row["release_direction"] = "none"
+                row["release_close"] = None
+                row["release_high"] = None
+                row["release_low"] = None
+                row["release_chase_atr"] = None
+                row["release_chase_risk"] = False
+                row["release_bullish_confirmed"] = False
+                row["release_bearish_confirmed"] = False
 
     above_trend = float(price) > float(trend_sma)
     below_trend = float(price) < float(trend_sma)
