@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   patch:
@@ -51,11 +51,15 @@ jobs:
           cat validation.log
           exit 0
 
-      - name: Commit generated patch and diagnostics
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app.py config/default_settings.yaml src/veto_engine.py src/trade_plan.py src/kc_squeeze_engine.py validation.log
-          git commit -m "Capture generated XAUUSD patch for validation"
-          git push origin HEAD:agent/app-scan-risk-fixes
+      - name: Upload generated patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-xauusd-patch
+          path: |
+            app.py
+            config/default_settings.yaml
+            src/veto_engine.py
+            src/trade_plan.py
+            src/kc_squeeze_engine.py
+            validation.log
+          if-no-files-found: error
