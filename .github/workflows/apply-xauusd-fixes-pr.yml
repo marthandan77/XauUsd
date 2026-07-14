@@ -1,0 +1,48 @@
+name: Apply XAUUSD fixes from PR
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/app-scan-risk-fixes
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Extract and run the one-time patch
+        shell: bash
+        run: |
+          awk '
+            /^          python <<'"'"'PY'"'"'$/ { capture=1; next }
+            /^          PY$/ { capture=0; exit }
+            capture { sub(/^          /, ""); print }
+          ' .github/workflows/apply-xauusd-fixes.yml > /tmp/apply_xauusd_fixes.py
+          python /tmp/apply_xauusd_fixes.py
+          rm -f .github/workflows/apply-xauusd-fixes-pr.yml
+
+      - name: Validate syntax and whitespace
+        run: |
+          git diff --check
+          python -m compileall -q app.py src
+
+      - name: Commit patched files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py config/default_settings.yaml src/veto_engine.py src/trade_plan.py src/kc_squeeze_engine.py .github/workflows/apply-xauusd-fixes.yml .github/workflows/apply-xauusd-fixes-pr.yml
+          git commit -m "Apply scan validation and risk model fixes"
+          git push origin HEAD:agent/app-scan-risk-fixes
