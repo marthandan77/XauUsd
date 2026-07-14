@@ -34,10 +34,39 @@ def undo_legacy_button_patch() -> None:
 undo_legacy_button_patch()
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _sample_freq(settings: dict) -> str:
+    interval = str(settings.get("price_interval", "5m"))
+    mapping = {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1D"}
+    return mapping.get(interval, "5min")
+
+
+def _interval_minutes(settings: dict) -> float:
+    return {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}.get(
+        str(settings.get("price_interval", "5m")), 5
+    )
+
+
+def validate_bars(bars: pd.DataFrame, settings: dict) -> str | None:
+    """Returns an error string if bars are unusable, else None."""
+    if bars.empty:
+        return "No bars returned from data source."
+    required = {"open", "high", "low", "close"}
+    if not required.issubset(bars.columns):
+        return f"Missing columns: {required - set(bars.columns)}"
+    if bars[list(required)].isna().any().any():
+        return "NaN values present in OHLC data."
+    if (bars["high"] < bars["low"]).any():
+        return "Invalid bars: high < low detected."
+    if hasattr(bars.index, "tz") and bars.index.tz is not None:
+        age_min = (pd.Timestamp.now(tz=bars.index.tz) - bars.index[-1]).total_seconds() / 60
+        max_age = settings.get("stale_candle_multiplier", 3.0) * _interval_minutes(settings)
+        if age_min > max_age:
+            return f"Stale data: latest bar is {age_min:.0f} min old (limit {max_age:.0f} min)."
+    return None
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
 CONTROL_PREFIX = "control_"
-_ENGINE: dict[str, Any] | None = None
-
 PERSISTED_SETTING_KEYS = [
     "price_interval",
     "price_period",
@@ -83,10 +112,8 @@ PERSISTED_SETTING_KEYS = [
 ]
 
 
+@st.cache_resource
 def engine() -> dict[str, Any]:
-    global _ENGINE
-    if _ENGINE is not None:
-        return _ENGINE
     from src.ai_explainer import explain
     from src.data_feed import FeedResult, load_csv, load_live_bars, make_sample_bars
     from src.forecast_engine import choose_action, score_forecast
@@ -100,9 +127,7 @@ def engine() -> dict[str, Any]:
     from src.regime_engine import classify_regime
     from src.trade_plan import advisory_position_size, build_trade_plan
     from src.veto_engine import apply_veto
-
-    _ENGINE = locals()
-    return _ENGINE
+    return locals()
 
 
 def safe_run_learning_cycle(result: dict) -> dict:
@@ -376,65 +401,83 @@ def fetch_bars(settings: dict):
 def run_strategy_scan(settings: dict, macro_bias: str) -> dict:
     e = engine()
     scan_settings = dict(settings)
-    feed = fetch_bars(scan_settings)
-    scan_settings["signals_disabled"] = feed.source == "sample"
-    scan_settings["signals_disabled_reason"] = "Sample data source; trade signals are disabled until live API or uploaded real CSV is active."
+    try:
+        feed = fetch_bars(scan_settings)
+        error = validate_bars(feed.bars, scan_settings)
+        if error:
+            return {"ok": False, "error": error, "feed": feed, "settings": safe_settings(scan_settings),
+                    "scan_time": pd.Timestamp.now(tz="Asia/Singapore"), "multi_horizon": []}
 
-    bars_raw = e["add_indicators"](feed.bars, scan_settings)
-    bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
-    if bars.empty:
-        return {"ok": False, "error": "Not enough clean OHLC data after indicator warm-up.", "feed": feed, "settings": safe_settings(scan_settings), "scan_time": pd.Timestamp.now(tz="Asia/Singapore"), "multi_horizon": []}
+        scan_settings["signals_disabled"] = feed.source == "sample"
+        scan_settings["signals_disabled_reason"] = "Sample data source; trade signals are disabled until live API or uploaded real CSV is active."
 
-    multi_horizon = e["build_multi_horizon_forecast"](bars, scan_settings)
-    kc = e["kc_squeeze_summary"](bars, scan_settings)
-    latest_row = bars.iloc[-1].to_dict()
-    latest_row["kc_state"] = kc["state"]
-    latest_row["kc_reason"] = kc["reason"]
-    market = e["build_market_map"](bars, scan_settings)
-    regime = e["classify_regime"](bars, market, scan_settings)
-    macro = e["macro_context"](macro_bias, bool(scan_settings.get("news_block_manual", False)))
-    scores = e["score_forecast"](latest_row, market, regime, macro, scan_settings)
-    if kc["state"] != "insufficient_data":
-        scores["kc_state"] = kc["state"]
-        scores["kc_reason"] = kc["reason"]
-    action = e["choose_action"](scores, scan_settings)
-    plan = e["build_trade_plan"](action, market, scan_settings)
-    bands = e["price_bands"](market, regime)
-    veto = e["apply_veto"](action, plan, market, regime, macro, scan_settings, latest_row, multi_horizon)
-    summary = e["explain"](regime, scores, veto, market, macro)
-    active_plan = veto["final_action"] in ACTIONABLE
-    advisory_qty = 0.0
-    if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
-        advisory_qty = e["advisory_position_size"](10000, float(scan_settings.get("risk_per_trade_pct", 0.5)) / 100.0, (float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0, float(plan["stop"]))
+        bars_raw = e["add_indicators"](feed.bars, scan_settings)
+        bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
+        if bars.empty:
+            return {"ok": False, "error": "Not enough clean OHLC data after indicator warm-up.",
+                    "feed": feed, "settings": safe_settings(scan_settings),
+                    "scan_time": pd.Timestamp.now(tz="Asia/Singapore"), "multi_horizon": []}
 
-    result = {
-        "ok": True,
-        "scan_time": pd.Timestamp.now(tz="Asia/Singapore"),
-        "feed": feed,
-        "settings": safe_settings(scan_settings),
-        "bars": bars,
-        "kc": kc,
-        "latest_row": latest_row,
-        "market": market,
-        "regime": regime,
-        "macro": macro,
-        "scores": scores,
-        "action": action,
-        "plan": plan,
-        "display_plan": plan,
-        "bands": bands,
-        "veto": veto,
-        "summary": summary,
-        "active_plan": active_plan,
-        "status": "Allowed" if active_plan else "No active trade",
-        "advisory_qty": advisory_qty,
-        "multi_horizon": multi_horizon,
-        "candidate_note": "",
-    }
-    result["signal_stage"] = e["signal_stage"](result)
-    result["gate_breakdown"] = e["build_gate_breakdown"](result)
-    result["gate_summary"] = e["summarize_gate_blockers"](result)
-    return result
+        min_needed = max(scan_settings.get("horizon_model_lookback_bars", 500) // 5, 100)
+        if len(bars) < min_needed:
+            return {"ok": False, "error": f"Only {len(bars)} clean bars; need at least {min_needed}.",
+                    "feed": feed, "settings": safe_settings(scan_settings),
+                    "scan_time": pd.Timestamp.now(tz="Asia/Singapore"), "multi_horizon": []}
+
+        multi_horizon = e["build_multi_horizon_forecast"](bars, scan_settings)
+        kc = e["kc_squeeze_summary"](bars, scan_settings)
+        latest_row = bars.iloc[-1].to_dict()
+        latest_row["kc_state"] = kc["state"]
+        latest_row["kc_reason"] = kc["reason"]
+
+        market = e["build_market_map"](bars, scan_settings)
+        regime = e["classify_regime"](bars, market, scan_settings)
+        macro = e["macro_context"](macro_bias, bool(scan_settings.get("news_block_manual", False)))
+        scores = e["score_forecast"](latest_row, market, regime, macro, scan_settings)
+        if kc["state"] != "insufficient_data":
+            scores["kc_state"] = kc["state"]
+            scores["kc_reason"] = kc["reason"]
+
+        action = e["choose_action"](scores, scan_settings)
+        plan = e["build_trade_plan"](action, market, scan_settings)
+        bands = e["price_bands"](market, regime)
+        veto = e["apply_veto"](action, plan, market, regime, macro, scan_settings, latest_row, multi_horizon)
+        summary = e["explain"](regime, scores, veto, market, macro)
+
+        active_plan = veto["final_action"] in ACTIONABLE
+        advisory_qty = 0.0
+        if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
+            account_size = float(scan_settings.get("account_size", 10000))
+            advisory_qty = e["advisory_position_size"](
+                account_size,
+                float(scan_settings.get("risk_per_trade_pct", 0.5)) / 100.0,
+                (float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0,
+                float(plan["stop"]),
+            )
+
+        result = {
+            "ok": True, "scan_time": pd.Timestamp.now(tz="Asia/Singapore"), "feed": feed,
+            "settings": safe_settings(scan_settings), "bars": bars, "kc": kc, "latest_row": latest_row,
+            "market": market, "regime": regime, "macro": macro, "scores": scores, "action": action,
+            "plan": plan, "display_plan": plan, "bands": bands, "veto": veto, "summary": summary,
+            "active_plan": active_plan, "status": "Allowed" if active_plan else "No active trade",
+            "advisory_qty": advisory_qty, "multi_horizon": multi_horizon, "candidate_note": "",
+        }
+        result["signal_stage"] = e["signal_stage"](result)
+        result["gate_breakdown"] = e["build_gate_breakdown"](result)
+        result["gate_summary"] = e["summarize_gate_blockers"](result)
+        return result
+
+    except Exception as exc:
+        import traceback
+        return {
+            "ok": False,
+            "error": f"Scan failed: {exc}",
+            "traceback": traceback.format_exc(),
+            "settings": safe_settings(scan_settings),
+            "scan_time": pd.Timestamp.now(tz="Asia/Singapore"),
+            "multi_horizon": [],
+        }
 
 
 def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go.Figure:
