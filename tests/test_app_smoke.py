@@ -15,6 +15,7 @@ def test_streamlit_app_starts_with_apply_and_scan_controls():
 
     assert not app.exception
     labels = [button.label for button in app.button]
+    assert "Reset" in labels
     assert "Apply Settings" in labels
     assert "Scan Market" in labels
 
