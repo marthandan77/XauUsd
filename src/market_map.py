@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 import pandas as pd
 
@@ -27,25 +27,45 @@ class MarketMap:
         return asdict(self)
 
 
+def _bars_per_day(interval: str) -> int:
+    return {
+        "15m": 96,
+        "30m": 48,
+        "1h": 24,
+        "4h": 6,
+        "1d": 1,
+    }.get(str(interval), 96)
+
+
 def build_market_map(df: pd.DataFrame, settings: dict) -> MarketMap:
     if df.empty:
         raise ValueError("cannot build market map from empty data")
+
     latest = df.iloc[-1]
-    window = df.tail(max(80, int(settings.get("lookback_days", 7)) * 96))
+    lookback_days = max(int(settings.get("lookback_days", 7)), 1)
+    interval = str(settings.get("price_interval", "15m"))
+    window_bars = max(lookback_days * _bars_per_day(interval), 1)
+    window = df.tail(window_bars)
+
     price = float(latest["close"])
     high_7d = float(window["high"].max())
     low_7d = float(window["low"].min())
     atr = float(latest.get("atr", 0) or 0)
     if atr <= 0:
         atr = max((high_7d - low_7d) / 50.0, 0.01)
-    recent = window.tail(20)
+
+    recent = df.tail(min(20, len(df)))
     vwap = float(latest.get("vwap", price))
     range_pos = 50.0 if high_7d == low_7d else ((price - low_7d) / (high_7d - low_7d)) * 100.0
+    range_pos = min(max(range_pos, 0.0), 100.0)
     tol = float(settings.get("support_resistance_tolerance_atr", 0.5)) * atr
     vwap_tol = float(settings.get("vwap_tolerance_atr", 0.35)) * atr
-    middle = float(settings.get("middle_range_lower_pct", 35)) <= range_pos <= float(settings.get("middle_range_upper_pct", 65))
+    middle = float(settings.get("middle_range_lower_pct", 35)) <= range_pos <= float(
+        settings.get("middle_range_upper_pct", 65)
+    )
     tr_mean = float(window["tr"].tail(50).mean()) if "tr" in window.columns else atr
     shock = float(latest.get("tr", 0) or 0) > float(settings.get("atr_shock_multiple", 2.2)) * max(tr_mean, 0.01)
+
     return MarketMap(
         price=price,
         atr=atr,
