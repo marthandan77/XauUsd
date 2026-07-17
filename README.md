@@ -12,7 +12,7 @@ The main design rule is:
 - Falls back to generated sample data when the live feed is unavailable and sample fallback is enabled.
 - Accepts CSV uploads with `time` or `datetime`, `open`, `high`, `low`, `close`, and optional `volume` columns.
 - Keeps sidebar changes as drafts until **Apply Settings** is pressed.
-- Saves applied settings in the active Streamlit browser session.
+- Saves applied settings in the app URL so they survive browser refreshes.
 - Runs data loading, indicators, KC Squeeze, regime classification, forecast scoring, trade planning, range bands, macro context, and veto logic only when **Scan Market** is pressed.
 - Calculates EMA, VWAP, ATR, RSI, ADX, realized volatility, Bollinger Bands, Keltner Channels, squeeze status, squeeze release, KC momentum, support, resistance, and swing levels.
 - Classifies bull trend, bear trend, range, shock, compression, bullish squeeze breakout, or bearish squeeze breakout regimes.
@@ -45,13 +45,13 @@ The default symbol is `XAU/USD`. It can be changed from the app sidebar or in `c
 ## Apply and scan workflow
 
 1. Adjust the sidebar controls or load a preset.
-2. Press **Apply Settings**. This activates the draft values and clears the previous scan.
+2. Press **Apply Settings**. This activates the draft values, saves them in the app URL, and clears the previous scan.
 3. Press **Scan Market** on the dashboard.
 4. The scan processes the active data source and every strategy module once.
 5. Review the Forecast Manager, KC Squeeze, Market Map, Macro / News, Settings, and Log Snapshot pages.
 6. After changing any setting, apply it and run a new scan.
 
-Applied settings persist for the active browser session. Use the Settings page to download the active configuration as YAML.
+Applied settings persist across browser refreshes through the app URL. Press **Reset** to clear the saved URL configuration and return to YAML defaults. Use the Settings page to download the active configuration as YAML.
 
 ## KC Squeeze conversion
 
@@ -87,7 +87,7 @@ python -m compileall -q app.py src tests
 pytest -q
 ```
 
-The test suite covers core veto and range logic, timeframe-correct market windows, CSV validation, Twelve Data interval mapping, Apply/Scan control presence, a full sample-data scan, and Streamlit startup.
+The test suite covers core veto and range logic, timeframe-correct market windows, CSV validation, Twelve Data interval mapping, Reset/Apply/Scan control presence, a full sample-data scan, and Streamlit startup.
 
 ## Deploy on Streamlit Cloud
 
@@ -100,9 +100,10 @@ The test suite covers core veto and range logic, timeframe-correct market window
 
 1. Keep Balanced Strict as the initial preset.
 2. Apply settings before each scan.
-3. Press Scan Market only when a fresh analysis is required.
-4. Keep shorts disabled unless short advisory plans are specifically required.
-5. Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches.
-6. Log at least 50 forecasts before changing parameters.
-7. Judge forecasts by regime, not by one or two trades.
-8. Keep WAIT/HOLD normal. The system is designed to reject weak setups.
+3. Use Reset when the saved URL settings should return to YAML defaults.
+4. Press Scan Market only when a fresh analysis is required.
+5. Keep shorts disabled unless short advisory plans are specifically required.
+6. Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches.
+7. Log at least 50 forecasts before changing parameters.
+8. Judge forecasts by regime, not by one or two trades.
+9. Keep WAIT/HOLD normal. The system is designed to reject weak setups.
