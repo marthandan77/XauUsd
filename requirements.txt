@@ -6,3 +6,4 @@ PyYAML>=6.0
 yfinance>=0.2.40
 requests>=2.32
 pytest>=8.0
+twelvedata
