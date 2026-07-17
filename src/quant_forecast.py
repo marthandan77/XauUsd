@@ -302,9 +302,22 @@ def build_unified_forecast(
     }
 
 
-def scan_validity(quant: dict, now: pd.Timestamp | None = None) -> dict:
+def scan_validity(
+    quant: dict,
+    current_price: float | None = None,
+    current_regime: str | None = None,
+    current_atr: float | None = None,
+    now: pd.Timestamp | None = None,
+) -> dict:
     if not quant or not quant.get("ready"):
-        return {"status": "UNAVAILABLE", "progress": 0.0, "remaining_seconds": 0.0}
+        return {
+            "status": "UNAVAILABLE",
+            "progress": 0.0,
+            "remaining_seconds": 0.0,
+            "price_deviation_sigma": None,
+            "reasons": ["quant forecast unavailable"],
+        }
+
     current = now or pd.Timestamp.now(tz="UTC")
     current = current.tz_localize("UTC") if current.tzinfo is None else current
     scanned, expiry = pd.Timestamp(quant["scanned_at"]), pd.Timestamp(quant["expiry_time"])
@@ -312,5 +325,42 @@ def scan_validity(quant: dict, now: pd.Timestamp | None = None) -> dict:
     expiry = expiry.tz_localize("UTC") if expiry.tzinfo is None else expiry
     remaining = max((expiry - current).total_seconds(), 0)
     progress = float(np.clip((current - scanned).total_seconds() / max((expiry - scanned).total_seconds(), 1), 0, 1))
-    status = "EXPIRED" if current >= expiry else "WEAKENING" if progress >= 0.75 else "VALID"
-    return {"status": status, "progress": progress, "remaining_seconds": remaining}
+
+    anchor = float(quant["anchor_price"])
+    price = float(current_price) if current_price is not None else anchor
+    mu = float(quant["expected_log_return"])
+    sigma = max(float(quant["forecast_sigma"]), EPS)
+    path_fraction = max(progress, 1.0 / max(int(quant.get("horizon_bars", 1)), 1))
+    expected_log_return = mu * progress
+    expected_path_price = anchor * math.exp(expected_log_return)
+    path_sigma = sigma * math.sqrt(path_fraction)
+    deviation = abs(math.log(max(price, EPS) / max(expected_path_price, EPS))) / max(path_sigma, EPS)
+
+    reasons: list[str] = []
+    if current >= expiry:
+        reasons.append("forecast horizon elapsed")
+    if deviation > 1.5:
+        reasons.append("price moved outside the 1.5-sigma path envelope")
+    scan_regime = quant.get("scan_regime")
+    if scan_regime and current_regime and str(current_regime) != str(scan_regime):
+        reasons.append("market regime changed")
+    scan_atr = quant.get("scan_atr")
+    if scan_atr and current_atr and float(scan_atr) > 0 and float(current_atr) > 0:
+        if abs(math.log(float(current_atr) / float(scan_atr))) > math.log(1.5):
+            reasons.append("ATR changed by more than the 1.5x volatility limit")
+
+    if reasons:
+        status = "EXPIRED"
+    elif progress >= 0.75 or deviation > 1.0:
+        status = "WEAKENING"
+    else:
+        status = "VALID"
+    return {
+        "status": status,
+        "progress": progress,
+        "remaining_seconds": remaining,
+        "price_deviation_sigma": float(deviation),
+        "expected_path_price": float(expected_path_price),
+        "current_price": float(price),
+        "reasons": reasons,
+    }
