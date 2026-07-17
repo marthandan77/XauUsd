@@ -37,9 +37,15 @@ def _select_index(options: list[str], value: str) -> int:
 
 
 def _sample_freq(settings: dict) -> str:
-    return {"15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1d"}.get(
+    return {"15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1D"}.get(
         str(settings.get("price_interval", "15m")), "15min"
     )
+
+
+def _sample_fallback(settings: dict, warning: str) -> FeedResult:
+    if not bool(settings.get("sample_data_enabled", True)):
+        return FeedResult(pd.DataFrame(), "none", warning)
+    return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", warning)
 
 
 def fmt_price(value) -> str:
@@ -91,51 +97,79 @@ def settings_panel(settings: dict, presets: dict) -> dict:
     settings["buy_threshold"] = st.sidebar.slider("Bull threshold", 50, 95, int(settings.get("buy_threshold", 78)))
     settings["sell_threshold"] = st.sidebar.slider("Bear threshold", 50, 95, int(settings.get("sell_threshold", 78)))
     settings["wait_threshold"] = st.sidebar.slider("Watch threshold", 40, 90, int(settings.get("wait_threshold", 60)))
-    settings["atr_multiplier"] = st.sidebar.slider("ATR guard multiplier", 0.8, 2.5, float(settings.get("atr_multiplier", 1.3)), 0.1)
-    settings["min_reward_risk"] = st.sidebar.slider("Minimum room ratio", 1.0, 3.0, float(settings.get("min_reward_risk", 1.5)), 0.1)
-    settings["middle_range_lower_pct"] = st.sidebar.slider("Middle zone lower %", 10, 49, int(settings.get("middle_range_lower_pct", 35)))
-    settings["middle_range_upper_pct"] = st.sidebar.slider("Middle zone upper %", 51, 90, int(settings.get("middle_range_upper_pct", 65)))
+    settings["atr_multiplier"] = st.sidebar.slider(
+        "ATR guard multiplier", 0.8, 2.5, float(settings.get("atr_multiplier", 1.3)), 0.1
+    )
+    settings["min_reward_risk"] = st.sidebar.slider(
+        "Minimum room ratio", 1.0, 3.0, float(settings.get("min_reward_risk", 1.5)), 0.1
+    )
+    settings["middle_range_lower_pct"] = st.sidebar.slider(
+        "Middle zone lower %", 10, 49, int(settings.get("middle_range_lower_pct", 35))
+    )
+    settings["middle_range_upper_pct"] = st.sidebar.slider(
+        "Middle zone upper %", 51, 90, int(settings.get("middle_range_upper_pct", 65))
+    )
 
     st.sidebar.header("KC Squeeze")
-    settings["kc_squeeze_enabled"] = st.sidebar.toggle("Enable KC Squeeze module", bool(settings.get("kc_squeeze_enabled", True)))
+    settings["kc_squeeze_enabled"] = st.sidebar.toggle(
+        "Enable KC Squeeze module", bool(settings.get("kc_squeeze_enabled", True))
+    )
     settings["bb_length"] = st.sidebar.slider("BB length", 10, 60, int(settings.get("bb_length", 20)))
     settings["bb_mult"] = st.sidebar.slider("BB multiplier", 1.0, 3.5, float(settings.get("bb_mult", 2.0)), 0.1)
     settings["kc_length"] = st.sidebar.slider("KC length", 10, 60, int(settings.get("kc_length", 20)))
     settings["kc_mult"] = st.sidebar.slider("KC multiplier", 1.0, 3.5, float(settings.get("kc_mult", 1.5)), 0.1)
     settings["trend_length"] = st.sidebar.slider("Trend SMA length", 50, 300, int(settings.get("trend_length", 200)))
     settings["atr_period"] = st.sidebar.slider("ATR period", 5, 50, int(settings.get("atr_period", 14)))
-    settings["atr_stop_multiplier"] = st.sidebar.slider("ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1)
-    settings["atr_tp_multiplier"] = st.sidebar.slider("ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1)
-    settings["risk_per_trade_pct"] = st.sidebar.slider("Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1)
-    settings["long_plans_enabled"] = st.sidebar.toggle("Enable long plans", bool(settings.get("long_plans_enabled", True)))
-    settings["short_plans_enabled"] = st.sidebar.toggle("Enable short plans", bool(settings.get("short_plans_enabled", False)))
-    settings["show_bollinger_bands"] = st.sidebar.toggle("Show Bollinger Bands", bool(settings.get("show_bollinger_bands", True)))
-    settings["show_keltner_channels"] = st.sidebar.toggle("Show Keltner Channels", bool(settings.get("show_keltner_channels", True)))
-    settings["news_block_manual"] = st.sidebar.toggle("Manual event block", bool(settings.get("news_block_manual", False)))
+    settings["atr_stop_multiplier"] = st.sidebar.slider(
+        "ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1
+    )
+    settings["atr_tp_multiplier"] = st.sidebar.slider(
+        "ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1
+    )
+    settings["risk_per_trade_pct"] = st.sidebar.slider(
+        "Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1
+    )
+    settings["long_plans_enabled"] = st.sidebar.toggle(
+        "Enable long plans", bool(settings.get("long_plans_enabled", True))
+    )
+    settings["short_plans_enabled"] = st.sidebar.toggle(
+        "Enable short plans", bool(settings.get("short_plans_enabled", False))
+    )
+    settings["show_bollinger_bands"] = st.sidebar.toggle(
+        "Show Bollinger Bands", bool(settings.get("show_bollinger_bands", True))
+    )
+    settings["show_keltner_channels"] = st.sidebar.toggle(
+        "Show Keltner Channels", bool(settings.get("show_keltner_channels", True))
+    )
+    settings["news_block_manual"] = st.sidebar.toggle(
+        "Manual event block", bool(settings.get("news_block_manual", False))
+    )
     return settings
 
 
 def load_bars(settings: dict) -> FeedResult:
     st.sidebar.header("Data")
-    data_mode = st.sidebar.radio("Data mode", ["Massive API", "yfinance fallback", "CSV upload", "Sample"], index=0)
+    data_mode = st.sidebar.radio("Data mode", ["Twelve Data", "CSV upload", "Sample"], index=0)
+
     if data_mode == "CSV upload":
         uploaded = st.sidebar.file_uploader("Upload OHLC CSV", type=["csv"])
-        if uploaded is not None:
-            return load_csv(uploaded)
-        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "CSV not uploaded; sample data used")
-    if data_mode == "Massive API":
-        settings["data_provider"] = "massive"
+        if uploaded is None:
+            return _sample_fallback(settings, "CSV not uploaded; sample data used")
+        feed = load_csv(uploaded)
+        if not feed.bars.empty:
+            return feed
+        return _sample_fallback(settings, f"{feed.warning}; sample data used")
+
+    if data_mode == "Twelve Data":
+        settings["twelve_data_symbol"] = st.sidebar.text_input(
+            "Twelve Data symbol", str(settings.get("twelve_data_symbol", "XAU/USD"))
+        ).strip() or "XAU/USD"
         feed = load_live_bars(settings)
         if not feed.bars.empty:
             return feed
-        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "Massive feed unavailable; sample data used. " + feed.warning)
-    if data_mode == "yfinance fallback":
-        settings["data_provider"] = "yfinance"
-        feed = load_live_bars(settings)
-        if not feed.bars.empty:
-            return feed
-        return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "yfinance feed unavailable; sample data used. " + feed.warning)
-    return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "sample data")
+        return _sample_fallback(settings, f"{feed.warning}; sample data used")
+
+    return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "sample data selected")
 
 
 def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go.Figure:
@@ -187,7 +221,9 @@ feed = load_bars(settings)
 bars_raw = add_indicators(feed.bars, settings)
 bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
 if bars.empty:
-    st.error("Not enough clean OHLC data after indicator warm-up. Increase lookback period or use sample data.")
+    st.error("Not enough clean OHLC data after indicator warm-up. Check the data source or enable sample data.")
+    if feed.warning:
+        st.warning(feed.warning)
     st.stop()
 
 kc = kc_squeeze_summary(bars, settings)
