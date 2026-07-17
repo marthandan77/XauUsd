@@ -352,6 +352,9 @@ def run_scan(settings: dict, macro_bias: str, data_mode: str, csv_bytes: bytes |
     bands = price_bands(market, regime)
     rule_veto = apply_veto(action, plan, market, regime, macro, settings)
     quant = build_unified_forecast(bars, scores, plan, rule_veto, settings, scanned_at)
+    if quant.get("ready"):
+        quant["scan_regime"] = regime
+        quant["scan_atr"] = float(market.atr)
 
     veto = dict(rule_veto)
     veto["rule_action"] = rule_veto["final_action"]
@@ -404,6 +407,34 @@ def run_scan(settings: dict, macro_bias: str, data_mode: str, csv_bytes: bytes |
     }
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_live_validity_snapshot(settings_json: str) -> dict:
+    settings = json.loads(settings_json)
+    status_settings = dict(settings)
+    minimum = max(int(status_settings.get("trend_length", 200)) + 50, 300)
+    status_settings["minimum_bars"] = minimum
+    status_settings["twelve_data_outputsize"] = max(
+        minimum,
+        min(int(status_settings.get("twelve_data_outputsize", 5000)), 1000),
+    )
+    feed = load_live_bars(status_settings)
+    if feed.bars.empty:
+        return {"warning": feed.warning}
+    enriched = add_indicators(feed.bars, status_settings)
+    clean = enriched.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
+    if clean.empty:
+        return {"warning": "Live validity bars did not complete indicator warm-up."}
+    market = build_market_map(clean, status_settings)
+    regime = classify_regime(clean, market, status_settings)
+    return {
+        "price": float(market.price),
+        "atr": float(market.atr),
+        "regime": regime,
+        "refreshed_at": pd.Timestamp.now(tz="UTC"),
+        "warning": feed.warning,
+    }
+
+
 def _effective_veto(result: dict, validity: dict) -> dict:
     veto = dict(result["veto"])
     veto["reasons"] = list(veto.get("reasons", []))
@@ -442,7 +473,15 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict, quant
     if quant and quant.get("ready"):
         horizon = int(quant["horizon_bars"])
         q = np.linspace(0.0, 1.0, horizon + 1)
-        path_index = pd.date_range(start=chart_df.index[-1], end=pd.Timestamp(quant["expiry_time"]), periods=horizon + 1)
+        path_start = pd.Timestamp(chart_df.index[-1])
+        path_end = pd.Timestamp(quant["expiry_time"])
+        if path_start.tzinfo is None and path_end.tzinfo is not None:
+            path_end = path_end.tz_localize(None)
+        elif path_start.tzinfo is not None and path_end.tzinfo is None:
+            path_end = path_end.tz_localize(path_start.tzinfo)
+        elif path_start.tzinfo is not None and path_end.tzinfo is not None:
+            path_end = path_end.tz_convert(path_start.tzinfo)
+        path_index = pd.date_range(start=path_start, end=path_end, periods=horizon + 1)
         anchor = float(quant["anchor_price"])
         mu = float(quant["expected_log_return"])
         half_width = float(quant["selected_diagnostics"]["conformal_half_width"])
@@ -453,10 +492,9 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict, quant
         fig.add_trace(go.Scatter(x=path_index, y=lower, mode="lines", name="Forecast lower"))
         fig.add_trace(go.Scatter(x=path_index, y=upper, mode="lines", name="Forecast upper"))
         fig.add_hline(y=anchor, line_dash="dot", annotation_text="Scan anchor")
-        expiry = pd.Timestamp(quant["expiry_time"])
         visible_low = float(min(chart_df["low"].min(), np.min(lower)))
         visible_high = float(max(chart_df["high"].max(), np.max(upper)))
-        fig.add_trace(go.Scatter(x=[expiry, expiry], y=[visible_low, visible_high], mode="lines", name="Scan expiry"))
+        fig.add_trace(go.Scatter(x=[path_end, path_end], y=[visible_low, visible_high], mode="lines", name="Scan expiry"))
 
     if action in ACTIONABLE and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None:
         marker_price = (float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0
@@ -470,7 +508,7 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict, quant
                 name="Unified signal",
             )
         )
-        for key, label in [("stop", "Guard"), ("tp1", "Target 1"), ("tp2", "Target 2")]:
+        for key, label in [("stop", "Stop Loss"), ("tp1", "Take Profit 1"), ("tp2", "Take Profit 2")]:
             if plan.get(key) is not None:
                 fig.add_hline(y=float(plan[key]), line_dash="dash", annotation_text=label)
 
@@ -548,28 +586,54 @@ scores = result["scores"]
 plan = result["plan"]
 bands = result["bands"]
 quant = result["quant"]
-validity = scan_validity(quant)
+status_snapshot: dict = {}
+scan_age_seconds = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(result["scanned_at"])).total_seconds()
+if result["data_mode"] == "Twelve Data" and quant.get("ready") and scan_age_seconds >= 60:
+    status_snapshot = load_live_validity_snapshot(json.dumps(settings, sort_keys=True, default=str))
+current_price = float(status_snapshot.get("price", market.price))
+current_atr = float(status_snapshot.get("atr", market.atr))
+current_regime = str(status_snapshot.get("regime", regime))
+validity = scan_validity(
+    quant,
+    current_price=current_price,
+    current_regime=current_regime,
+    current_atr=current_atr,
+)
 veto = _effective_veto(result, validity)
 active_plan = veto["final_action"] in ACTIONABLE
 advisory_qty = result["advisory_qty"] if active_plan else 0.0
 
 source_cols = st.columns(4)
 source_cols[0].metric("Data source", feed.source)
-source_cols[1].metric("Latest price", fmt_price(market.price))
+source_cols[1].metric("Current price", fmt_price(current_price))
 source_cols[2].metric("Rows loaded", f"{len(feed.bars):,}")
 source_cols[3].metric("Rows after warm-up", f"{len(bars):,}")
 if feed.warning:
     st.warning(feed.warning)
 
 if page == "Forecast Manager":
-    validity_cols = st.columns(5)
-    validity_cols[0].metric("Scan status", validity["status"])
-    validity_cols[1].metric("Horizon", f"{quant.get('horizon_bars', 0)} bars")
-    validity_cols[2].metric("Remaining", fmt_duration(validity.get("remaining_seconds", 0)))
-    validity_cols[3].metric("Expiry", pd.Timestamp(quant["expiry_time"]).strftime("%Y-%m-%d %H:%M UTC") if quant.get("ready") else "N/A")
-    validity_cols[4].metric("Quant mode", str(quant.get("mode", "unavailable")).title())
+    validity_primary = st.columns(4)
+    validity_primary[0].metric("Scan status", validity["status"])
+    validity_primary[1].metric("Current price", fmt_price(current_price))
+    deviation = validity.get("price_deviation_sigma")
+    validity_primary[2].metric("Path deviation", f"{deviation:.2f}σ" if deviation is not None else "N/A")
+    validity_primary[3].metric("Remaining", fmt_duration(validity.get("remaining_seconds", 0)))
+    validity_secondary = st.columns(4)
+    validity_secondary[0].metric("Horizon", f"{quant.get('horizon_bars', 0)} bars")
+    validity_secondary[1].metric(
+        "Expiry",
+        pd.Timestamp(quant["expiry_time"]).strftime("%Y-%m-%d %H:%M UTC") if quant.get("ready") else "N/A",
+    )
+    validity_secondary[2].metric("Quant mode", str(quant.get("mode", "unavailable")).title())
+    half_life = quant.get("half_life_bars")
+    validity_secondary[3].metric("Signal half-life", f"{half_life:.2f} bars" if half_life is not None else "N/A")
     if validity["status"] == "EXPIRED":
-        st.error("EXPIRED — RESCAN REQUIRED")
+        reason_text = "; ".join(validity.get("reasons", []))
+        st.error("EXPIRED — RESCAN REQUIRED" + (f": {reason_text}" if reason_text else ""))
+    elif validity["status"] == "WEAKENING":
+        st.warning("Scan edge is weakening. Rescan before treating the plan as actionable.")
+    if status_snapshot.get("warning"):
+        st.caption("Validity refresh warning: " + str(status_snapshot["warning"]))
 
     if quant.get("ready"):
         forecast_cols = st.columns(5)
@@ -602,12 +666,12 @@ if page == "Forecast Manager":
     trade_cols = st.columns(6)
     trade_cols[0].metric("Entry low", fmt_price(active_value(plan, "entry_zone_low", veto["final_action"])))
     trade_cols[1].metric("Entry high", fmt_price(active_value(plan, "entry_zone_high", veto["final_action"])))
-    trade_cols[2].metric("Guard", fmt_price(active_value(plan, "stop", veto["final_action"])))
-    trade_cols[3].metric("Target 1", fmt_price(active_value(plan, "tp1", veto["final_action"])))
+    trade_cols[2].metric("Stop Loss", fmt_price(active_value(plan, "stop", veto["final_action"])))
+    trade_cols[3].metric("Take Profit 1", fmt_price(active_value(plan, "tp1", veto["final_action"])))
     trade_cols[4].metric("TP before SL", fmt_percent(quant.get("tp_before_sl_probability")))
     trade_cols[5].metric("Expected value", fmt_price(quant.get("expected_value")))
     extra_cols = st.columns(2)
-    extra_cols[0].metric("Target 2", fmt_price(active_value(plan, "tp2", veto["final_action"])))
+    extra_cols[0].metric("Take Profit 2", fmt_price(active_value(plan, "tp2", veto["final_action"])))
     extra_cols[1].metric("Advisory units @ $10k", fmt_units(advisory_qty))
 
     st.subheader("Price, forecast path and strategy levels")
@@ -646,8 +710,8 @@ elif page == "Log Snapshot":
         "scanned_at_utc": result["scanned_at"].isoformat(),
         "scan_status": validity["status"],
         "source": feed.source,
-        "price": market.price,
-        "regime": regime,
+        "price": current_price,
+        "regime": current_regime,
         "rule_action": veto.get("rule_action"),
         "final_action": veto["final_action"],
         "quant_mode": quant.get("mode"),
@@ -656,6 +720,7 @@ elif page == "Log Snapshot":
         "quant_lower_price": quant.get("lower_price"),
         "quant_upper_price": quant.get("upper_price"),
         "probability_up": quant.get("probability_up"),
+        "price_deviation_sigma": validity.get("price_deviation_sigma"),
         "tp_before_sl_probability": quant.get("tp_before_sl_probability"),
         "expected_value": quant.get("expected_value"),
         "confidence": scores["confidence"],
@@ -663,9 +728,9 @@ elif page == "Log Snapshot":
         "veto_reasons": "; ".join(veto["reasons"]),
         "entry_zone_low": active_value(plan, "entry_zone_low", veto["final_action"]),
         "entry_zone_high": active_value(plan, "entry_zone_high", veto["final_action"]),
-        "guard_level": active_value(plan, "stop", veto["final_action"]),
-        "target_1": active_value(plan, "tp1", veto["final_action"]),
-        "target_2": active_value(plan, "tp2", veto["final_action"]),
+        "stop_loss": active_value(plan, "stop", veto["final_action"]),
+        "take_profit_1": active_value(plan, "tp1", veto["final_action"]),
+        "take_profit_2": active_value(plan, "tp2", veto["final_action"]),
     }
     snap = pd.DataFrame([row])
     st.dataframe(snap, use_container_width=True)
