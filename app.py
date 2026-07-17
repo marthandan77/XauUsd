@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import math
 from io import BytesIO
 from pathlib import Path
@@ -115,18 +117,74 @@ def _draft_key(setting_key: str) -> str:
     return f"draft_{setting_key}"
 
 
+def _encode_persisted_config(settings: dict, data_mode: str, macro_bias: str) -> str:
+    payload = {
+        "settings": settings,
+        "data_mode": data_mode,
+        "macro_bias": macro_bias,
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _read_persisted_config() -> dict:
+    token = st.query_params.get("config")
+    if not token:
+        return {}
+    if isinstance(token, list):
+        token = token[-1]
+    try:
+        padded = str(token) + "=" * (-len(str(token)) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_persisted_config(settings: dict, data_mode: str, macro_bias: str) -> None:
+    st.query_params["config"] = _encode_persisted_config(settings, data_mode, macro_bias)
+
+
+def _clear_app_state() -> None:
+    st.query_params.clear()
+    managed_keys = {
+        "applied_settings",
+        "applied_data_mode",
+        "applied_macro_bias",
+        "applied_csv_bytes",
+        "applied_csv_name",
+        "scan_result",
+        "draft_state_initialized",
+        "selected_preset",
+        "sidebar_notice",
+        "draft_uploaded_csv",
+    }
+    for key in list(st.session_state.keys()):
+        if key in managed_keys or key.startswith("draft_"):
+            del st.session_state[key]
+
+
 def _sync_draft_state(settings: dict) -> None:
     for setting_key in DRAFT_SETTING_KEYS:
         st.session_state[_draft_key(setting_key)] = settings.get(setting_key)
 
 
 def _initialize_session(default_settings: dict) -> None:
+    persisted = _read_persisted_config()
+    persisted_settings = persisted.get("settings") if isinstance(persisted.get("settings"), dict) else {}
+
     if "applied_settings" not in st.session_state:
-        st.session_state.applied_settings = dict(default_settings)
+        applied = dict(default_settings)
+        for key, value in persisted_settings.items():
+            if key in applied:
+                applied[key] = value
+        st.session_state.applied_settings = applied
     if "applied_data_mode" not in st.session_state:
-        st.session_state.applied_data_mode = "Twelve Data"
+        saved_mode = str(persisted.get("data_mode", "Twelve Data"))
+        st.session_state.applied_data_mode = saved_mode if saved_mode in DATA_MODES else "Twelve Data"
     if "applied_macro_bias" not in st.session_state:
-        st.session_state.applied_macro_bias = "mixed"
+        saved_bias = str(persisted.get("macro_bias", "mixed"))
+        st.session_state.applied_macro_bias = saved_bias if saved_bias in MACRO_BIASES else "mixed"
     if "applied_csv_bytes" not in st.session_state:
         st.session_state.applied_csv_bytes = None
     if "applied_csv_name" not in st.session_state:
@@ -161,6 +219,12 @@ def settings_panel(default_settings: dict, presets: dict) -> None:
         st.sidebar.success(notice)
 
     with st.sidebar.form("settings_form", clear_on_submit=False):
+        reset_col, apply_col = st.columns(2)
+        reset_clicked = reset_col.form_submit_button("Reset", use_container_width=True)
+        apply_clicked = apply_col.form_submit_button(
+            "Apply Settings", type="primary", use_container_width=True
+        )
+
         st.subheader("Data")
         data_mode = st.radio("Data mode", DATA_MODES, key="draft_data_mode")
         symbol = st.text_input(
@@ -224,9 +288,11 @@ def settings_panel(default_settings: dict, presets: dict) -> None:
         )
         news_block_manual = st.toggle("Manual event block", key="draft_news_block_manual")
 
-        applied = st.form_submit_button("Apply Settings", type="primary", use_container_width=True)
+    if reset_clicked:
+        _clear_app_state()
+        st.rerun()
 
-    if applied:
+    if apply_clicked:
         updated = dict(st.session_state.applied_settings)
         updated.update(
             {
@@ -263,12 +329,13 @@ def settings_panel(default_settings: dict, presets: dict) -> None:
         if uploaded is not None:
             st.session_state.applied_csv_bytes = uploaded.getvalue()
             st.session_state.applied_csv_name = uploaded.name
+        _write_persisted_config(updated, data_mode, macro_bias)
         st.session_state.scan_result = None
         st.session_state.sidebar_notice = "Settings applied. Press Scan Market to run a fresh analysis."
         st.rerun()
 
     st.sidebar.caption(
-        "Applied settings are saved for this browser session. Draft changes do not affect a scan until Apply Settings is pressed."
+        "Applied settings are saved in the app URL and survive browser refreshes. Draft changes do not affect a scan until Apply Settings is pressed."
     )
 
 
