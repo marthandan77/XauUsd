@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.quant_forecast import build_feature_frame, build_unified_forecast
+from src.quant_forecast import build_feature_frame, build_unified_forecast, scan_validity
 
 
 def _bars(rows=900):
@@ -55,3 +55,41 @@ def test_unified_forecast_returns_price_distribution():
     assert result["lower_price"] < result["upper_price"]
     assert 0 <= result["probability_up"] <= 1
     assert result["horizon_bars"] in {1, 2, 4}
+
+
+def _validity_quant():
+    return {
+        "ready": True,
+        "anchor_price": 2300.0,
+        "expected_log_return": 0.001,
+        "forecast_sigma": 0.002,
+        "horizon_bars": 4,
+        "scanned_at": pd.Timestamp("2026-02-01 12:00", tz="UTC"),
+        "expiry_time": pd.Timestamp("2026-02-01 13:00", tz="UTC"),
+        "scan_regime": "bull_trend",
+        "scan_atr": 2.0,
+    }
+
+
+def test_scan_validity_expires_on_price_path_break():
+    result = scan_validity(
+        _validity_quant(),
+        current_price=2325.0,
+        current_regime="bull_trend",
+        current_atr=2.0,
+        now=pd.Timestamp("2026-02-01 12:15", tz="UTC"),
+    )
+    assert result["status"] == "EXPIRED"
+    assert result["price_deviation_sigma"] > 1.5
+
+
+def test_scan_validity_expires_on_regime_change():
+    result = scan_validity(
+        _validity_quant(),
+        current_price=2300.0,
+        current_regime="range",
+        current_atr=2.0,
+        now=pd.Timestamp("2026-02-01 12:15", tz="UTC"),
+    )
+    assert result["status"] == "EXPIRED"
+    assert "market regime changed" in result["reasons"]
