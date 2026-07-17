@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -22,6 +23,38 @@ from src.veto_engine import apply_veto
 
 ROOT = Path(__file__).resolve().parent
 ACTIONABLE = {"BUY PLAN", "SELL PLAN"}
+DATA_MODES = ["Twelve Data", "CSV upload", "Sample"]
+MACRO_BIASES = ["mixed", "supportive", "restrictive"]
+INTERVAL_OPTIONS = ["15m", "30m", "1h", "4h", "1d"]
+PERIOD_OPTIONS = ["7d", "30d", "60d", "6mo", "1y", "2y"]
+
+DRAFT_SETTING_KEYS = [
+    "twelve_data_symbol",
+    "price_interval",
+    "price_period",
+    "buy_threshold",
+    "sell_threshold",
+    "wait_threshold",
+    "atr_multiplier",
+    "min_reward_risk",
+    "middle_range_lower_pct",
+    "middle_range_upper_pct",
+    "kc_squeeze_enabled",
+    "bb_length",
+    "bb_mult",
+    "kc_length",
+    "kc_mult",
+    "trend_length",
+    "atr_period",
+    "atr_stop_multiplier",
+    "atr_tp_multiplier",
+    "risk_per_trade_pct",
+    "long_plans_enabled",
+    "short_plans_enabled",
+    "show_bollinger_bands",
+    "show_keltner_channels",
+    "news_block_manual",
+]
 
 st.set_page_config(page_title="XAU/USD Forecast Manager", layout="wide")
 
@@ -78,98 +111,256 @@ def active_value(plan: dict, key: str, final_action: str):
     return plan.get(key)
 
 
-def settings_panel(settings: dict, presets: dict) -> dict:
+def _draft_key(setting_key: str) -> str:
+    return f"draft_{setting_key}"
+
+
+def _sync_draft_state(settings: dict) -> None:
+    for setting_key in DRAFT_SETTING_KEYS:
+        st.session_state[_draft_key(setting_key)] = settings.get(setting_key)
+
+
+def _initialize_session(default_settings: dict) -> None:
+    if "applied_settings" not in st.session_state:
+        st.session_state.applied_settings = dict(default_settings)
+    if "applied_data_mode" not in st.session_state:
+        st.session_state.applied_data_mode = "Twelve Data"
+    if "applied_macro_bias" not in st.session_state:
+        st.session_state.applied_macro_bias = "mixed"
+    if "applied_csv_bytes" not in st.session_state:
+        st.session_state.applied_csv_bytes = None
+    if "applied_csv_name" not in st.session_state:
+        st.session_state.applied_csv_name = None
+    if "scan_result" not in st.session_state:
+        st.session_state.scan_result = None
+    if "draft_state_initialized" not in st.session_state:
+        _sync_draft_state(st.session_state.applied_settings)
+        st.session_state.draft_data_mode = st.session_state.applied_data_mode
+        st.session_state.draft_macro_bias = st.session_state.applied_macro_bias
+        st.session_state.draft_state_initialized = True
+
+
+def _load_selected_preset(default_settings: dict, presets: dict, selected_name: str) -> None:
+    preset_settings = dict(default_settings)
+    preset_settings.update(presets.get(selected_name, {}))
+    _sync_draft_state(preset_settings)
+    st.session_state.sidebar_notice = f"{selected_name} loaded as draft. Press Apply Settings to activate it."
+
+
+def settings_panel(default_settings: dict, presets: dict) -> None:
     st.sidebar.header("Forecast controls")
+
     if presets:
-        selected = st.sidebar.selectbox("Preset", list(presets.keys()), index=0)
-        if st.sidebar.button("Load preset"):
-            settings.update(presets[selected])
+        selected = st.sidebar.selectbox("Preset", list(presets.keys()), key="selected_preset")
+        if st.sidebar.button("Load preset", use_container_width=True):
+            _load_selected_preset(default_settings, presets, selected)
+            st.rerun()
 
-    interval_options = ["15m", "30m", "1h", "4h", "1d"]
-    period_options = ["7d", "30d", "60d", "6mo", "1y", "2y"]
-    settings["price_interval"] = st.sidebar.selectbox(
-        "Timeframe", interval_options, index=_select_index(interval_options, str(settings.get("price_interval", "15m")))
-    )
-    settings["price_period"] = st.sidebar.selectbox(
-        "Lookback period", period_options, index=_select_index(period_options, str(settings.get("price_period", "30d")))
+    notice = st.session_state.pop("sidebar_notice", None)
+    if notice:
+        st.sidebar.success(notice)
+
+    with st.sidebar.form("settings_form", clear_on_submit=False):
+        st.subheader("Data")
+        data_mode = st.radio("Data mode", DATA_MODES, key="draft_data_mode")
+        symbol = st.text_input(
+            "Twelve Data symbol",
+            key="draft_twelve_data_symbol",
+            disabled=data_mode != "Twelve Data",
+        )
+        uploaded = st.file_uploader(
+            "Upload OHLC CSV",
+            type=["csv"],
+            key="draft_uploaded_csv",
+            disabled=data_mode != "CSV upload",
+        )
+        macro_bias = st.selectbox("Macro bias", MACRO_BIASES, key="draft_macro_bias")
+
+        st.subheader("Forecast")
+        price_interval = st.selectbox("Timeframe", INTERVAL_OPTIONS, key="draft_price_interval")
+        price_period = st.selectbox("Lookback period", PERIOD_OPTIONS, key="draft_price_period")
+        buy_threshold = st.slider("Bull threshold", 50, 95, key="draft_buy_threshold")
+        sell_threshold = st.slider("Bear threshold", 50, 95, key="draft_sell_threshold")
+        wait_threshold = st.slider("Watch threshold", 40, 90, key="draft_wait_threshold")
+        atr_multiplier = st.slider(
+            "ATR guard multiplier", 0.8, 2.5, step=0.1, key="draft_atr_multiplier"
+        )
+        min_reward_risk = st.slider(
+            "Minimum room ratio", 1.0, 3.0, step=0.1, key="draft_min_reward_risk"
+        )
+        middle_range_lower_pct = st.slider(
+            "Middle zone lower %", 10, 49, key="draft_middle_range_lower_pct"
+        )
+        middle_range_upper_pct = st.slider(
+            "Middle zone upper %", 51, 90, key="draft_middle_range_upper_pct"
+        )
+
+        st.subheader("KC Squeeze and risk")
+        kc_squeeze_enabled = st.toggle(
+            "Enable KC Squeeze module", key="draft_kc_squeeze_enabled"
+        )
+        bb_length = st.slider("BB length", 10, 60, key="draft_bb_length")
+        bb_mult = st.slider("BB multiplier", 1.0, 3.5, step=0.1, key="draft_bb_mult")
+        kc_length = st.slider("KC length", 10, 60, key="draft_kc_length")
+        kc_mult = st.slider("KC multiplier", 1.0, 3.5, step=0.1, key="draft_kc_mult")
+        trend_length = st.slider("Trend SMA length", 50, 300, key="draft_trend_length")
+        atr_period = st.slider("ATR period", 5, 50, key="draft_atr_period")
+        atr_stop_multiplier = st.slider(
+            "ATR stop multiplier", 1.0, 5.0, step=0.1, key="draft_atr_stop_multiplier"
+        )
+        atr_tp_multiplier = st.slider(
+            "ATR take-profit multiplier", 1.0, 10.0, step=0.1, key="draft_atr_tp_multiplier"
+        )
+        risk_per_trade_pct = st.slider(
+            "Advisory risk %", 0.1, 2.0, step=0.1, key="draft_risk_per_trade_pct"
+        )
+        long_plans_enabled = st.toggle("Enable long plans", key="draft_long_plans_enabled")
+        short_plans_enabled = st.toggle("Enable short plans", key="draft_short_plans_enabled")
+        show_bollinger_bands = st.toggle(
+            "Show Bollinger Bands", key="draft_show_bollinger_bands"
+        )
+        show_keltner_channels = st.toggle(
+            "Show Keltner Channels", key="draft_show_keltner_channels"
+        )
+        news_block_manual = st.toggle("Manual event block", key="draft_news_block_manual")
+
+        applied = st.form_submit_button("Apply Settings", type="primary", use_container_width=True)
+
+    if applied:
+        updated = dict(st.session_state.applied_settings)
+        updated.update(
+            {
+                "twelve_data_symbol": symbol.strip() or "XAU/USD",
+                "price_interval": price_interval,
+                "price_period": price_period,
+                "buy_threshold": buy_threshold,
+                "sell_threshold": sell_threshold,
+                "wait_threshold": wait_threshold,
+                "atr_multiplier": atr_multiplier,
+                "min_reward_risk": min_reward_risk,
+                "middle_range_lower_pct": middle_range_lower_pct,
+                "middle_range_upper_pct": middle_range_upper_pct,
+                "kc_squeeze_enabled": kc_squeeze_enabled,
+                "bb_length": bb_length,
+                "bb_mult": bb_mult,
+                "kc_length": kc_length,
+                "kc_mult": kc_mult,
+                "trend_length": trend_length,
+                "atr_period": atr_period,
+                "atr_stop_multiplier": atr_stop_multiplier,
+                "atr_tp_multiplier": atr_tp_multiplier,
+                "risk_per_trade_pct": risk_per_trade_pct,
+                "long_plans_enabled": long_plans_enabled,
+                "short_plans_enabled": short_plans_enabled,
+                "show_bollinger_bands": show_bollinger_bands,
+                "show_keltner_channels": show_keltner_channels,
+                "news_block_manual": news_block_manual,
+            }
+        )
+        st.session_state.applied_settings = updated
+        st.session_state.applied_data_mode = data_mode
+        st.session_state.applied_macro_bias = macro_bias
+        if uploaded is not None:
+            st.session_state.applied_csv_bytes = uploaded.getvalue()
+            st.session_state.applied_csv_name = uploaded.name
+        st.session_state.scan_result = None
+        st.session_state.sidebar_notice = "Settings applied. Press Scan Market to run a fresh analysis."
+        st.rerun()
+
+    st.sidebar.caption(
+        "Applied settings are saved for this browser session. Draft changes do not affect a scan until Apply Settings is pressed."
     )
 
-    settings["buy_threshold"] = st.sidebar.slider("Bull threshold", 50, 95, int(settings.get("buy_threshold", 78)))
-    settings["sell_threshold"] = st.sidebar.slider("Bear threshold", 50, 95, int(settings.get("sell_threshold", 78)))
-    settings["wait_threshold"] = st.sidebar.slider("Watch threshold", 40, 90, int(settings.get("wait_threshold", 60)))
-    settings["atr_multiplier"] = st.sidebar.slider(
-        "ATR guard multiplier", 0.8, 2.5, float(settings.get("atr_multiplier", 1.3)), 0.1
-    )
-    settings["min_reward_risk"] = st.sidebar.slider(
-        "Minimum room ratio", 1.0, 3.0, float(settings.get("min_reward_risk", 1.5)), 0.1
-    )
-    settings["middle_range_lower_pct"] = st.sidebar.slider(
-        "Middle zone lower %", 10, 49, int(settings.get("middle_range_lower_pct", 35))
-    )
-    settings["middle_range_upper_pct"] = st.sidebar.slider(
-        "Middle zone upper %", 51, 90, int(settings.get("middle_range_upper_pct", 65))
-    )
 
-    st.sidebar.header("KC Squeeze")
-    settings["kc_squeeze_enabled"] = st.sidebar.toggle(
-        "Enable KC Squeeze module", bool(settings.get("kc_squeeze_enabled", True))
-    )
-    settings["bb_length"] = st.sidebar.slider("BB length", 10, 60, int(settings.get("bb_length", 20)))
-    settings["bb_mult"] = st.sidebar.slider("BB multiplier", 1.0, 3.5, float(settings.get("bb_mult", 2.0)), 0.1)
-    settings["kc_length"] = st.sidebar.slider("KC length", 10, 60, int(settings.get("kc_length", 20)))
-    settings["kc_mult"] = st.sidebar.slider("KC multiplier", 1.0, 3.5, float(settings.get("kc_mult", 1.5)), 0.1)
-    settings["trend_length"] = st.sidebar.slider("Trend SMA length", 50, 300, int(settings.get("trend_length", 200)))
-    settings["atr_period"] = st.sidebar.slider("ATR period", 5, 50, int(settings.get("atr_period", 14)))
-    settings["atr_stop_multiplier"] = st.sidebar.slider(
-        "ATR stop multiplier", 1.0, 5.0, float(settings.get("atr_stop_multiplier", 3.0)), 0.1
-    )
-    settings["atr_tp_multiplier"] = st.sidebar.slider(
-        "ATR take-profit multiplier", 1.0, 10.0, float(settings.get("atr_tp_multiplier", 6.0)), 0.1
-    )
-    settings["risk_per_trade_pct"] = st.sidebar.slider(
-        "Advisory risk %", 0.1, 2.0, float(settings.get("risk_per_trade_pct", 0.5)), 0.1
-    )
-    settings["long_plans_enabled"] = st.sidebar.toggle(
-        "Enable long plans", bool(settings.get("long_plans_enabled", True))
-    )
-    settings["short_plans_enabled"] = st.sidebar.toggle(
-        "Enable short plans", bool(settings.get("short_plans_enabled", False))
-    )
-    settings["show_bollinger_bands"] = st.sidebar.toggle(
-        "Show Bollinger Bands", bool(settings.get("show_bollinger_bands", True))
-    )
-    settings["show_keltner_channels"] = st.sidebar.toggle(
-        "Show Keltner Channels", bool(settings.get("show_keltner_channels", True))
-    )
-    settings["news_block_manual"] = st.sidebar.toggle(
-        "Manual event block", bool(settings.get("news_block_manual", False))
-    )
-    return settings
-
-
-def load_bars(settings: dict) -> FeedResult:
-    st.sidebar.header("Data")
-    data_mode = st.sidebar.radio("Data mode", ["Twelve Data", "CSV upload", "Sample"], index=0)
-
+def load_bars(settings: dict, data_mode: str, csv_bytes: bytes | None) -> FeedResult:
     if data_mode == "CSV upload":
-        uploaded = st.sidebar.file_uploader("Upload OHLC CSV", type=["csv"])
-        if uploaded is None:
+        if not csv_bytes:
             return _sample_fallback(settings, "CSV not uploaded; sample data used")
-        feed = load_csv(uploaded)
+        feed = load_csv(BytesIO(csv_bytes))
         if not feed.bars.empty:
             return feed
         return _sample_fallback(settings, f"{feed.warning}; sample data used")
 
     if data_mode == "Twelve Data":
-        settings["twelve_data_symbol"] = st.sidebar.text_input(
-            "Twelve Data symbol", str(settings.get("twelve_data_symbol", "XAU/USD"))
-        ).strip() or "XAU/USD"
         feed = load_live_bars(settings)
         if not feed.bars.empty:
             return feed
         return _sample_fallback(settings, f"{feed.warning}; sample data used")
 
     return FeedResult(make_sample_bars(freq=_sample_freq(settings)), "sample", "sample data selected")
+
+
+def run_scan(settings: dict, macro_bias: str, data_mode: str, csv_bytes: bytes | None) -> dict:
+    feed = load_bars(settings, data_mode, csv_bytes)
+    if feed.bars.empty:
+        return {
+            "error": "No market data is available. Check the data source, API secret, or CSV file.",
+            "feed": feed,
+        }
+
+    bars_raw = add_indicators(feed.bars, settings)
+    bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
+    if bars.empty:
+        return {
+            "error": "Not enough clean OHLC data after indicator warm-up. Increase the lookback or enable sample data.",
+            "feed": feed,
+        }
+
+    kc = kc_squeeze_summary(bars, settings)
+    latest_row = bars.iloc[-1].to_dict()
+    latest_row["kc_state"] = kc["state"]
+    latest_row["kc_reason"] = kc["reason"]
+
+    market = build_market_map(bars, settings)
+    regime = classify_regime(bars, market, settings)
+    macro = macro_context(macro_bias, bool(settings.get("news_block_manual", False)))
+    scores = score_forecast(latest_row, market, regime, macro, settings)
+    if kc["state"] != "insufficient_data":
+        scores["kc_state"] = kc["state"]
+        scores["kc_reason"] = kc["reason"]
+
+    action = choose_action(scores, settings)
+    plan = build_trade_plan(action, market, settings)
+    bands = price_bands(market, regime)
+    veto = apply_veto(action, plan, market, regime, macro, settings)
+    summary = explain(regime, scores, veto, market, macro)
+    active_plan = veto["final_action"] in ACTIONABLE
+
+    advisory_qty = 0.0
+    if (
+        active_plan
+        and plan.get("entry_zone_low") is not None
+        and plan.get("entry_zone_high") is not None
+        and plan.get("stop") is not None
+    ):
+        advisory_qty = advisory_position_size(
+            account_equity=10000,
+            risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0,
+            entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0,
+            stop=float(plan["stop"]),
+        )
+
+    return {
+        "error": "",
+        "scanned_at": pd.Timestamp.now(tz="UTC"),
+        "settings": dict(settings),
+        "macro_bias": macro_bias,
+        "data_mode": data_mode,
+        "feed": feed,
+        "bars": bars,
+        "kc": kc,
+        "market": market,
+        "regime": regime,
+        "macro": macro,
+        "scores": scores,
+        "action": action,
+        "plan": plan,
+        "bands": bands,
+        "veto": veto,
+        "summary": summary,
+        "active_plan": active_plan,
+        "advisory_qty": advisory_qty,
+    }
 
 
 def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go.Figure:
@@ -212,51 +403,65 @@ def price_chart(df: pd.DataFrame, settings: dict, action: str, plan: dict) -> go
     return fig
 
 
-settings = load_yaml(ROOT / "config/default_settings.yaml")
+default_settings = load_yaml(ROOT / "config/default_settings.yaml")
 presets = load_yaml(ROOT / "config/presets.yaml")
-settings = settings_panel(settings, presets)
-macro_bias = st.sidebar.selectbox("Macro bias", ["mixed", "supportive", "restrictive"], index=0)
-feed = load_bars(settings)
+_initialize_session(default_settings)
+settings_panel(default_settings, presets)
 
-bars_raw = add_indicators(feed.bars, settings)
-bars = bars_raw.dropna(subset=["close", "atr", "ema_fast", "ema_slow", "trend_sma"]).copy()
-if bars.empty:
-    st.error("Not enough clean OHLC data after indicator warm-up. Check the data source or enable sample data.")
-    if feed.warning:
+page = st.sidebar.radio(
+    "Page",
+    ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"],
+)
+
+settings = dict(st.session_state.applied_settings)
+data_mode = str(st.session_state.applied_data_mode)
+macro_bias = str(st.session_state.applied_macro_bias)
+csv_bytes = st.session_state.applied_csv_bytes
+
+st.title("XAU/USD Forecast Manager")
+st.caption("Advisory dashboard only. Apply settings first, then scan. No broker execution or auto-trading.")
+
+scan_col, status_col = st.columns([1, 3])
+with scan_col:
+    scan_clicked = st.button("Scan Market", type="primary", use_container_width=True, key="scan_market")
+with status_col:
+    if st.session_state.scan_result is None:
+        st.info("No active scan. Apply the sidebar settings, then press Scan Market.")
+    else:
+        scanned_at = st.session_state.scan_result.get("scanned_at")
+        if scanned_at is not None:
+            st.success(f"Last scan completed: {scanned_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+if scan_clicked:
+    with st.spinner("Scanning data and running all strategy modules..."):
+        st.session_state.scan_result = run_scan(settings, macro_bias, data_mode, csv_bytes)
+    st.rerun()
+
+result = st.session_state.scan_result
+if result is None:
+    st.stop()
+
+if result.get("error"):
+    st.error(result["error"])
+    feed = result.get("feed")
+    if feed is not None and feed.warning:
         st.warning(feed.warning)
     st.stop()
 
-kc = kc_squeeze_summary(bars, settings)
-latest_row = bars.iloc[-1].to_dict()
-latest_row["kc_state"] = kc["state"]
-latest_row["kc_reason"] = kc["reason"]
-
-market = build_market_map(bars, settings)
-regime = classify_regime(bars, market, settings)
-macro = macro_context(macro_bias, bool(settings.get("news_block_manual", False)))
-scores = score_forecast(latest_row, market, regime, macro, settings)
-if kc["state"] != "insufficient_data":
-    scores["kc_state"] = kc["state"]
-    scores["kc_reason"] = kc["reason"]
-action = choose_action(scores, settings)
-plan = build_trade_plan(action, market, settings)
-bands = price_bands(market, regime)
-veto = apply_veto(action, plan, market, regime, macro, settings)
-summary = explain(regime, scores, veto, market, macro)
-active_plan = veto["final_action"] in ACTIONABLE
-
-advisory_qty = 0.0
-if active_plan and plan.get("entry_zone_low") is not None and plan.get("entry_zone_high") is not None and plan.get("stop") is not None:
-    advisory_qty = advisory_position_size(
-        account_equity=10000,
-        risk_pct=float(settings.get("risk_per_trade_pct", 0.5)) / 100.0,
-        entry=(float(plan["entry_zone_low"]) + float(plan["entry_zone_high"])) / 2.0,
-        stop=float(plan["stop"]),
-    )
-
-st.title("XAU/USD Forecast Manager")
-st.caption("Advisory dashboard only. No broker execution. No auto-trading. No backtesting. Veto first, signal second.")
-page = st.sidebar.radio("Page", ["Forecast Manager", "KC Squeeze", "Market Map", "Macro / News", "Settings", "Log Snapshot"])
+settings = result["settings"]
+feed = result["feed"]
+bars = result["bars"]
+kc = result["kc"]
+market = result["market"]
+regime = result["regime"]
+macro = result["macro"]
+scores = result["scores"]
+plan = result["plan"]
+bands = result["bands"]
+veto = result["veto"]
+summary = result["summary"]
+active_plan = result["active_plan"]
+advisory_qty = result["advisory_qty"]
 
 source_cols = st.columns(4)
 source_cols[0].metric("Data source", feed.source)
@@ -295,7 +500,17 @@ if page == "Forecast Manager":
 elif page == "KC Squeeze":
     st.subheader("KC Squeeze module")
     st.json(kc)
-    cols = ["close", "trend_sma", "bb_upper", "bb_lower", "kc_upper", "kc_lower", "squeeze_on", "squeeze_fired", "kc_momentum"]
+    cols = [
+        "close",
+        "trend_sma",
+        "bb_upper",
+        "bb_lower",
+        "kc_upper",
+        "kc_lower",
+        "squeeze_on",
+        "squeeze_fired",
+        "kc_momentum",
+    ]
     st.dataframe(bars[[c for c in cols if c in bars.columns]].tail(30), use_container_width=True)
     st.plotly_chart(price_chart(bars, settings, veto["final_action"], plan), use_container_width=True)
 
@@ -309,15 +524,25 @@ elif page == "Market Map":
 elif page == "Macro / News":
     st.subheader("Macro context")
     st.json(macro)
-    st.write("Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches. API calendar can be added later.")
+    st.write("Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches.")
 
 elif page == "Settings":
-    st.subheader("Active settings")
-    st.json(settings)
-    st.download_button("Download settings YAML", yaml.safe_dump(settings, sort_keys=False), file_name="active_settings.yaml")
+    st.subheader("Applied settings used by the last scan")
+    settings_view = dict(settings)
+    settings_view["data_mode"] = result["data_mode"]
+    settings_view["macro_bias"] = result["macro_bias"]
+    if st.session_state.applied_csv_name:
+        settings_view["csv_file"] = st.session_state.applied_csv_name
+    st.json(settings_view)
+    st.download_button(
+        "Download settings YAML",
+        yaml.safe_dump(settings_view, sort_keys=False),
+        file_name="active_settings.yaml",
+    )
 
 elif page == "Log Snapshot":
     row = {
+        "scanned_at_utc": result["scanned_at"].isoformat(),
         "source": feed.source,
         "warning": feed.warning,
         "price": market.price,
@@ -338,4 +563,8 @@ elif page == "Log Snapshot":
     }
     snap = pd.DataFrame([row])
     st.dataframe(snap, use_container_width=True)
-    st.download_button("Download snapshot CSV", snap.to_csv(index=False), file_name="xauusd_forecast_snapshot.csv")
+    st.download_button(
+        "Download snapshot CSV",
+        snap.to_csv(index=False),
+        file_name="xauusd_forecast_snapshot.csv",
+    )
