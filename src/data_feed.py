@@ -28,15 +28,16 @@ def make_sample_bars(rows: int = 900, freq: str = "15min") -> pd.DataFrame:
 def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
+    df = df.copy()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
     df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
     df.columns = [str(c).strip().lower() for c in df.columns]
     if "time" in df.columns:
-        df["time"] = pd.to_datetime(df["time"])
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
         df = df.set_index("time")
-    if "datetime" in df.columns:
-        df["datetime"] = pd.to_datetime(df["datetime"])
+    elif "datetime" in df.columns:
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
         df = df.set_index("datetime")
     required = ["open", "high", "low", "close"]
     missing = [c for c in required if c not in df.columns]
@@ -47,7 +48,10 @@ def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     out = df[["open", "high", "low", "close", "volume"]].copy()
     for column in ["open", "high", "low", "close", "volume"]:
         out[column] = pd.to_numeric(out[column], errors="coerce")
-    return out.dropna(subset=["open", "high", "low", "close"]).sort_index()
+    out = out.dropna(subset=["open", "high", "low", "close"])
+    if isinstance(out.index, pd.DatetimeIndex):
+        out = out[~out.index.isna()]
+    return out[~out.index.duplicated(keep="last")].sort_index()
 
 
 def _get_twelve_data_api_key() -> str:
@@ -85,7 +89,6 @@ def _period_days(period: str) -> int:
 
 
 def _bars_per_day(interval: str) -> int:
-    # Approximation for active weekday forex/CFD coverage. Used only to request enough bars.
     return {
         "15m": 96,
         "30m": 48,
@@ -99,8 +102,8 @@ def _outputsize(settings: dict) -> int:
     interval = str(settings.get("price_interval", "15m"))
     period = str(settings.get("price_period", "30d"))
     requested = _period_days(period) * _bars_per_day(interval)
-    minimum = int(settings.get("minimum_bars", 500))
-    maximum = int(settings.get("twelve_data_outputsize", 5000))
+    minimum = max(int(settings.get("minimum_bars", 500)), 1)
+    maximum = max(int(settings.get("twelve_data_outputsize", 5000)), minimum)
     return max(min(requested, maximum), minimum)
 
 
@@ -141,5 +144,10 @@ def load_live_bars(settings: dict) -> FeedResult:
 
 
 def load_csv(uploaded_file) -> FeedResult:
-    bars = normalize_ohlc(pd.read_csv(uploaded_file))
+    try:
+        bars = normalize_ohlc(pd.read_csv(uploaded_file))
+    except Exception as exc:
+        return FeedResult(pd.DataFrame(), "uploaded_csv:error", f"CSV load failed: {exc}")
+    if bars.empty:
+        return FeedResult(pd.DataFrame(), "uploaded_csv:error", "CSV contained no valid OHLC rows")
     return FeedResult(bars, "uploaded_csv", "")
