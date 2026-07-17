@@ -11,6 +11,9 @@ The main design rule is:
 - Loads XAU/USD OHLC data from Twelve Data using `TWELVE_DATA_API_KEY`.
 - Falls back to generated sample data when the live feed is unavailable and sample fallback is enabled.
 - Accepts CSV uploads with `time` or `datetime`, `open`, `high`, `low`, `close`, and optional `volume` columns.
+- Keeps sidebar changes as drafts until **Apply Settings** is pressed.
+- Saves applied settings in the active Streamlit browser session.
+- Runs data loading, indicators, KC Squeeze, regime classification, forecast scoring, trade planning, range bands, macro context, and veto logic only when **Scan Market** is pressed.
 - Calculates EMA, VWAP, ATR, RSI, ADX, realized volatility, Bollinger Bands, Keltner Channels, squeeze status, squeeze release, KC momentum, support, resistance, and swing levels.
 - Classifies bull trend, bear trend, range, shock, compression, bullish squeeze breakout, or bearish squeeze breakout regimes.
 - Creates ATR-based expected-range forecasts.
@@ -39,6 +42,17 @@ TWELVE_DATA_API_KEY = "your-api-key"
 
 The default symbol is `XAU/USD`. It can be changed from the app sidebar or in `config/default_settings.yaml`.
 
+## Apply and scan workflow
+
+1. Adjust the sidebar controls or load a preset.
+2. Press **Apply Settings**. This activates the draft values and clears the previous scan.
+3. Press **Scan Market** on the dashboard.
+4. The scan processes the active data source and every strategy module once.
+5. Review the Forecast Manager, KC Squeeze, Market Map, Macro / News, Settings, and Log Snapshot pages.
+6. After changing any setting, apply it and run a new scan.
+
+Applied settings persist for the active browser session. Use the Settings page to download the active configuration as YAML.
+
 ## KC Squeeze conversion
 
 The original QuantConnect strategy used:
@@ -57,7 +71,7 @@ In this Streamlit project:
 - `src/regime_engine.py` classifies compression and squeeze-breakout regimes.
 - `src/forecast_engine.py` blends KC Squeeze information into bull/bear scoring.
 - `src/trade_plan.py` creates advisory entry, guard, and target levels only.
-- `app.py` displays the dashboard and Plotly chart overlays.
+- `app.py` controls settings application, scan execution, dashboard rendering, and Plotly chart overlays.
 
 ## Run locally
 
@@ -73,7 +87,7 @@ python -m compileall -q app.py src tests
 pytest -q
 ```
 
-The test suite covers core veto and range logic, timeframe-correct market windows, CSV validation, Twelve Data interval mapping, and a Streamlit `AppTest` startup check.
+The test suite covers core veto and range logic, timeframe-correct market windows, CSV validation, Twelve Data interval mapping, Apply/Scan control presence, a full sample-data scan, and Streamlit startup.
 
 ## Deploy on Streamlit Cloud
 
@@ -84,10 +98,11 @@ The test suite covers core veto and range logic, timeframe-correct market window
 
 ## Recommended workflow
 
-1. Run in dashboard mode.
-2. Keep Balanced Strict preset first.
-3. Keep shorts disabled unless short advisory plans are specifically required.
-4. Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches.
-5. Log at least 50 forecasts before changing parameters.
-6. Judge forecasts by regime, not by one or two trades.
-7. Keep WAIT/HOLD normal. The system is designed to reject weak setups.
+1. Keep Balanced Strict as the initial preset.
+2. Apply settings before each scan.
+3. Press Scan Market only when a fresh analysis is required.
+4. Keep shorts disabled unless short advisory plans are specifically required.
+5. Use the manual event block around CPI, NFP, PCE, FOMC and major Fed speeches.
+6. Log at least 50 forecasts before changing parameters.
+7. Judge forecasts by regime, not by one or two trades.
+8. Keep WAIT/HOLD normal. The system is designed to reject weak setups.
