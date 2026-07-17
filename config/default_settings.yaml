@@ -47,3 +47,10 @@ kc_compression_score: 3
 realized_vol_length: 100
 show_bollinger_bands: true
 show_keltner_channels: true
+quant_candidate_horizons: [1, 2, 3, 4, 6, 8]
+quant_default_horizon_bars: 4
+quant_min_samples: 100
+quant_train_fraction: 0.70
+quant_ridge_lambda: 5.0
+quant_min_probability: 0.60
+quant_cost_atr_fraction: 0.05
