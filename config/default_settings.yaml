@@ -1,6 +1,8 @@
 preset_name: Balanced Strict
-symbol_primary: XAUUSD=X
-symbol_fallback: GC=F
+twelve_data_symbol: XAU/USD
+timezone: Asia/Singapore
+minimum_bars: 500
+twelve_data_outputsize: 5000
 price_interval: 15m
 price_period: 30d
 lookback_days: 7
